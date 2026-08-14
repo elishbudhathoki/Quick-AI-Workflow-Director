@@ -916,10 +916,18 @@ class VideoJobManager:
             result = {"name": self.projects.clean_name(str(info.get("title") or "Downloaded video")) + target.suffix,
                       "mimeType": mimetypes.guess_type(target.name)[0] or "video/mp4", "sourceFile": f"media/{target_name}",
                       "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(target_name)}", "size": target.stat().st_size,
-                      "title": info.get("title"), "duration": info.get("duration"), "extractor": info.get("extractor")}
+                      "title": info.get("title"), "duration": info.get("duration"), "extractor": info.get("extractor"),
+                      "sourceUrl": url, "retrievedAt": utc_now()}
             with self.lock: self.jobs[job_id].update(state="ready", progress=100, result=result, updatedAt=utc_now())
         except Exception as error:
-            with self.lock: self.jobs[job_id].update(state="failed", error=str(error), updatedAt=utc_now())
+            message = str(error)
+            if "ffmpeg is not installed" in message.lower():
+                message = "FFmpeg is required to merge this source's audio and video streams. Install FFmpeg, restart AI Canvas, and retry."
+            elif "drm" in message.lower():
+                message = "This source is DRM-protected and cannot be downloaded."
+            elif "not available" in message.lower():
+                message = "This video is not publicly available to the downloader. Try another public source."
+            with self.lock: self.jobs[job_id].update(state="failed", error=message, updatedAt=utc_now())
 
 
 class CanvasRequestHandler(SimpleHTTPRequestHandler):

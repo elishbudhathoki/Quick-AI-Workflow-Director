@@ -586,6 +586,10 @@
         name,
         src,
         sourceFile: options.sourceFile || null,
+        sourceUrl: options.sourceUrl || null,
+        sourceTitle: options.sourceTitle || name,
+        sourceExtractor: options.sourceExtractor || null,
+        retrievedAt: options.retrievedAt || null,
         mimeType: options.mimeType || "video/mp4",
         duration: Number.isFinite(video.duration) ? video.duration : 0,
         naturalWidth,
@@ -2146,6 +2150,10 @@
           sourceAssetName: asset.name,
           sourceReferenceNumber: asset.referenceNumber,
           durationSeconds: asset.duration,
+          sourceUrl: asset.sourceUrl || null,
+          sourceTitle: asset.sourceTitle || asset.name,
+          extractor: asset.sourceExtractor || null,
+          retrievedAt: asset.retrievedAt || null,
           instruction,
           description: asset.videoDescription,
           use: asset.videoUse,
@@ -2961,7 +2969,7 @@
       const response = await fetch(`/api/projects/${projectId}/video-jobs/${encodeURIComponent(job.id)}`, { cache: "no-store" });
       const status = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(status.error || "Video download status could not be read");
-      if (status.state === "ready") { addVideo(status.result.src, status.result.name, { mimeType: status.result.mimeType, sourceFile: status.result.sourceFile }); setStatus(`Video downloaded · ${status.result.name}`); return; }
+      if (status.state === "ready") { addVideo(status.result.src, status.result.name, { mimeType: status.result.mimeType, sourceFile: status.result.sourceFile, sourceUrl: status.result.sourceUrl, sourceTitle: status.result.title, sourceExtractor: status.result.extractor, retrievedAt: status.result.retrievedAt }); setStatus(`Video downloaded · ${status.result.name}`); return; }
       if (status.state === "failed" || status.state === "cancelled") throw new Error(status.error || `Video job ${status.state}`);
       setStatus(status.state === "resolving" ? "Resolving public video page…" : "Downloading public video…");
     }
