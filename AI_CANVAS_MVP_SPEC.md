@@ -22,6 +22,7 @@ Phase boundaries:
 
 - **Phase 1:** Complete local image-reference canvas, image-aware prompt drafting, and manual local export.
 - **Phase 2:** Video link/file ingestion, whole-video references, frame extraction, video-aware drafting, and optional destination delivery to ChatGPT, Gemini, or other tools through supported integration adapters.
+- **Phase 3:** Local derived reference maps from images and extracted video frames: edges, depth, pose, line art, normals, and segmentation.
 
 ## 2. Product principles
 
@@ -64,7 +65,7 @@ The MVP must allow a user to:
 - Vector illustration or general-purpose whiteboarding.
 - Browser automation of consumer AI websites.
 - Direct dispatch to ChatGPT, Gemini, or generation APIs; this is Phase 2.
-- Automatic subject segmentation or background removal.
+- Automatic subject segmentation or background removal in Phase 1 or Phase 2; this is introduced as an optional derived map in Phase 3.
 - A marketplace for templates or provider adapters.
 - Mobile or tablet applications.
 - Training or fine-tuning custom models.
@@ -131,6 +132,8 @@ The user enters:
 - Positive constraints.
 - Negative constraints.
 - Optional custom provider instructions.
+
+Prompt drafting instructions may be saved as reusable local templates. The template shelf supports click-to-apply, drag-and-drop onto the instruction field, and importing plain-text or Markdown (`.txt`/`.md`) files. Templates are shared locally across projects and never uploaded merely by saving or browsing them.
 
 ### 5.6 Analyze references and draft the prompt
 
@@ -1135,6 +1138,16 @@ Exit condition: One click after confirmation submits the same prompt and media p
 
 Exit condition: Repeating a familiar workflow is meaningfully faster than manually uploading and describing references.
 
+### Milestone 8 — Phase 3 derived reference maps
+
+- One compact **Generate maps** action on a selected image or extracted video frame.
+- Fast local Canny/edge maps with no model download.
+- Optional local model installation and execution for depth, pose, line art, normal, and segmentation maps.
+- Derived-map persistence, provenance, cache reuse, export, and validation.
+- Performance and quality checks on CPU and supported GPU hardware.
+
+Exit condition: A user can select an image, choose one map or a small preset, receive clearly labeled derived reference assets without uploading the source, and include the appropriate maps in a local export.
+
 ## 22. Phase 2 — Video references and destination delivery
 
 ### 22.1 Video ingestion
@@ -1173,6 +1186,21 @@ The card adds compact playback controls:
 - Capture current frame.
 - Extract Frames action.
 
+#### Local frame-picker experience
+
+Double-clicking a video card, or choosing **Open frame picker** from its inspector, opens a dedicated local frame picker. This is a reference-selection surface inspired by modern mobile editors such as CapCut and TikTok, not a general-purpose editing timeline.
+
+- Playback, seeking, thumbnails, and frame export operate only from the project-managed local video or its local playback proxy; no new network request is required after import/download.
+- The large paused or playing video is the single source of truth for the selected frame. The app must not present a second, conflicting frame preview.
+- A thumbnail filmstrip sits under a fixed playhead. Dragging, scrolling, clicking, or keyboard navigation moves the local video to the selected timestamp.
+- The picker exposes only the controls needed for reference selection: close, play/pause, timestamp, seamless timeline scaling, and **Export frame** beside the active playhead.
+- Left/right arrows step one decoded frame at the current playhead. The exact resolved timestamp is shown to milliseconds and is the timestamp exported.
+- Filmstrip navigation uses one continuous timeline rather than named mode tabs. Pinch or Ctrl + wheel scales smoothly from the whole clip to individual-frame precision around the current playhead without losing the selection; ordinary scroll/trackpad movement scrubs.
+- When FFmpeg is available, the app creates a project-local, lower-resolution scrub proxy with frequent keyframes in the background. Preview playback, seeking, and thumbnail generation use that optimized proxy; timestamp-accurate frame export always decodes the retained original source.
+- Preview thumbnails are generated from the same local source, are low-cost navigation aids rather than exported assets, and are cached by source video plus timestamp. Opening the picker must render the local video immediately; thumbnail work continues progressively without blocking playback or seeking.
+- On long clips, the zoomed-out timeline is sampled across the duration and zoomed-in views generate a bounded window around the playhead. The UI must not decode every frame solely to render the first view.
+- The user can move rapidly from the beginning to the end of a video, then continuously zoom to individual frames without changing modes or leaving the picker.
+
 Phase 2 annotations apply to the **entire video**, not a spatial rectangle or a time range. A selected video exposes the same fast natural-language instruction field used by images. Examples:
 
 ```text
@@ -1196,6 +1224,8 @@ The Extract Frames action offers:
 - **Every frame:** advanced mode for short clips, with an explicit storage and frame-count warning.
 
 Before extraction, the app shows estimated frame count and disk usage. The user can choose PNG or JPEG, maximum dimension, JPEG quality, and whether to create individual canvas cards, a contact sheet, or both.
+
+The frame picker is the canonical source for **Current frame** extraction. Exporting from it captures the exact local playhead frame using the selected quality preference; its preview thumbnail is never substituted for the source-resolution export.
 
 Extraction runs in the background with progress and cancellation. Output filenames are deterministic and Windows-safe:
 
@@ -1267,13 +1297,87 @@ Manual export is always available. Do not use browser automation to imitate file
 - A video card survives move, resize, delete/undo, save, close, and reopen.
 - Whole-video annotations can be added, edited, included/excluded, deleted, and restored without spatial regions.
 - Current-frame, uniform, target-count, keyframe, and guarded every-frame extraction produce timestamp-accurate files.
+- The local frame picker opens without waiting for a full filmstrip, supports overview-to-frame navigation, and exports the exact displayed local frame.
 - Extracted frames behave identically to normal Phase 1 images.
 - Direct-video and frame-fallback analysis produce manifests that state exactly which representation was analyzed.
 - The prompt references every exported video or frame by its exact filename and intended semantic role.
 - A destination adapter cannot send unsupported media silently; it must convert with preview or stop with a clear error.
 - No prompt or media is delivered externally until the user confirms the final destination package.
 
-## 23. Post-Phase-2 roadmap
+## 23. Phase 3 — Local derived reference maps
+
+### 23.1 Purpose and scope
+
+Phase 3 lets a user generate structural reference maps from any local image or extracted video frame in a few clicks. These maps help downstream image-generation tools preserve composition, depth, pose, or edges while the original image remains available as the visual reference.
+
+The feature is a local preprocessing workflow, not an image generator and not an automatic edit to the original asset. It supports:
+
+- **Canny / edges** for high-contrast structure.
+- **Depth** for relative scene layout.
+- **Pose** for human body, hand, face, and gesture structure where the selected detector supports it.
+- **Line art** for simplified contour guidance.
+- **Normal** for surface-orientation guidance.
+- **Segmentation** for semantic-region reference.
+
+Phase 3 starts with still images and extracted video frames. Whole-video batch processing, masks used to modify original media, and automatic background removal are deferred.
+
+### 23.2 Fast interaction model
+
+Selecting a supported image shows a compact **Generate maps** action in the inspector. It opens a small popover rather than a new workspace or a large settings panel:
+
+```text
+Generate maps
+  [Edges] [Depth] [Pose]
+  More: Line art, Normal, Segmentation
+  Presets: Structure (Edges + Depth + Pose) | Illustration (Line art + Normal)
+  Generate
+```
+
+The user may choose one map or a preset, then presses **Generate** once. Results appear as new, clearly labeled derived image assets beside or stacked with the source. They can be moved, resized, grouped, included/excluded from prompt compilation, annotated, exported, deleted, undone, and restored just like any ordinary image asset.
+
+The original source image is never overwritten, hidden, recolored, or downsampled. The source and every derived map remain visibly linked in the inspector.
+
+### 23.3 Local processing and model policy
+
+- Canny/edge output runs locally with a lightweight image-processing dependency and requires no model download.
+- Depth, pose, line art, normal, and segmentation use locally installed open-source preprocessors and their required model weights. A suitable processor bundle may be used behind a provider-neutral local adapter; model-specific code must not leak into project data.
+- The app must show the model name, approximate download size, version, license notice/link where required, and storage location before first download. Downloading models requires explicit user confirmation.
+- Processing is local. Imported images, extracted frames, generated maps, and model inference results are never uploaded merely to create a map.
+- GPU acceleration is used when available and compatible. CPU fallback is allowed, but the UI must report that the task may be slower and remain cancellable.
+- Missing, incompatible, or failed models show a clear install/retry/error state without blocking the canvas or disabling maps that are available.
+
+### 23.4 Derived-map data and quality
+
+Each generated map records:
+
+- Source asset ID and source content hash.
+- Map type, settings, preprocessor/model name, and model version.
+- Source dimensions, generated dimensions, creation time, and local filename.
+- Whether the map is stale because its source was replaced.
+
+Maps default to the source image dimensions unless the user explicitly selects a lower working resolution. Map thumbnails may be lightweight, but exported map files retain the selected output dimensions and are never replaced by a thumbnail.
+
+The local cache key is source hash plus map type, settings, and model version. Repeating an identical request reuses the valid output. Cancelling a request removes incomplete temporary output but preserves previously generated maps.
+
+### 23.5 Processing behavior
+
+- Generation runs as a background local job with queued, installing-model, processing, complete, cancelled, and failed states.
+- The canvas stays interactive while maps generate; job feedback appears on the source asset and in the status area.
+- The first useful result from a multi-map preset appears as soon as it completes. A failed map does not discard successful maps from the same preset.
+- Map controls expose only relevant parameters by default: Canny low/high thresholds, optional depth inversion, and pose variant. Advanced preprocessor settings remain collapsed.
+- Maps visually distinguish their type through an icon/label, never through ambiguous filenames alone.
+
+### 23.6 Phase 3 acceptance criteria
+
+- Canny output can be generated from a normal local image with one action and no model installation.
+- A user can install optional local models only after reviewing the download and storage impact, then create depth and pose maps without uploading the image.
+- The **Structure** preset produces independently usable edge, depth, and pose assets; partial success is retained and clearly reported.
+- Original and derived maps persist across save, close, reopen, undo/redo, duplication, and local export with their provenance intact.
+- Repeating a valid map request uses cached output and does not re-run model inference.
+- A long-running model task can be cancelled without corrupting the project or blocking normal canvas interaction.
+- Exported maps meet the selected source-quality/output-resolution policy and identify their map type and source in the manifest.
+
+## 24. Post-Phase-3 roadmap
 
 1. Timeline ranges and timestamped subclip annotations.
 2. Multiple video tracks or side-by-side motion comparison.
@@ -1286,7 +1390,7 @@ Manual export is always available. Do not use browser automation to imitate file
 9. Optional encrypted synchronization.
 10. Team collaboration and shared libraries if the product expands beyond personal use.
 
-## 24. Decisions intentionally deferred
+## 25. Decisions intentionally deferred
 
 - Final product name and visual identity.
 - Tauri versus Electron, pending the technical spike.
@@ -1298,7 +1402,7 @@ Manual export is always available. Do not use browser automation to imitate file
 - Whether projects are folders or packaged single-file archives in the final UX.
 - Commercial licensing, accounts, billing, and cloud infrastructure.
 
-## 25. Definition of Phase 1 success
+## 26. Definition of Phase 1 success
 
 The MVP is successful when a user can take a scattered set of visual references, precisely describe which parts matter, compile them into a trustworthy package, and submit that package without manually renaming files or rewriting the reference explanation.
 

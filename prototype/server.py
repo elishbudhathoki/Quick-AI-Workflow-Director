@@ -38,6 +38,18 @@ MAX_VIDEO_BYTES = 240 * 1024 * 1024
 MAX_REFERENCES = 30
 
 
+def find_ffmpeg() -> str | None:
+    configured = os.environ.get("FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if configured:
+        return configured
+    try:
+        import imageio_ffmpeg  # type: ignore[import-not-found]
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, OSError):
+        return None
+
+
 PROVIDERS: dict[str, dict[str, Any]] = {
     "openai": {
         "id": "openai",
@@ -250,16 +262,20 @@ class ProjectRepository:
             raise ValueError("Only base64 media data URLs can be saved in a project.")
         return match.group(1), base64.b64decode(match.group(2), validate=True)
 
-    def save(self, project_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def save(self, project_id: str, snapshot: dict[str, Any], snapshot_revision: int | None = None) -> dict[str, Any]:
         folder = self.folder(project_id)
         record_file = folder / "project.json"
         if not record_file.exists():
             raise FileNotFoundError("Project not found.")
         record = json.loads(record_file.read_text(encoding="utf-8"))
+        saved_revision = int(record.get("snapshotRevision") or 0)
+        if snapshot_revision is not None and snapshot_revision < saved_revision:
+            return self.summary(record, folder)
         stored_snapshot = json.loads(json.dumps(snapshot))
         media_folder = folder / "media"
         media_folder.mkdir(exist_ok=True)
         for asset in stored_snapshot.get("assets") or []:
+            asset.pop("scrubProxySrc", None)
             source = str(asset.get("src") or "")
             if not source.startswith("data:"):
                 continue
@@ -271,6 +287,8 @@ class ProjectRepository:
             asset["sourceFile"] = f"media/{filename}"
             asset.pop("src", None)
         record["snapshot"] = stored_snapshot
+        if snapshot_revision is not None:
+            record["snapshotRevision"] = snapshot_revision
         record["updatedAt"] = utc_now()
         self.write_record(folder, record)
         return self.summary(record, folder)
@@ -387,6 +405,47 @@ class ProjectRepository:
             raise FileNotFoundError("Project media file not found.")
         return path
 
+    def create_scrub_proxy(self, project_id: str, source_file: str) -> dict[str, Any]:
+        folder = self.folder(project_id)
+        source = (folder / str(source_file)).resolve()
+        media_folder = (folder / "media").resolve()
+        if media_folder not in source.parents or source.parent != media_folder:
+            raise ValueError("Invalid video source path.")
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError("Source video was not found.")
+        proxy = media_folder / f"{source.stem}.scrub.mp4"
+        if proxy.exists() and proxy.stat().st_size > 0 and proxy.stat().st_mtime >= source.stat().st_mtime:
+            return {
+                "sourceFile": f"media/{proxy.name}",
+                "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(proxy.name)}",
+                "cached": True,
+            }
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError("FFmpeg is required to create the fast local scrub proxy.")
+        temporary = media_folder / f".{proxy.name}.{secrets.token_hex(4)}.tmp.mp4"
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+            "-map", "0:v:0", "-an",
+            "-vf", "scale=960:960:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-g", "12", "-keyint_min", "12", "-sc_threshold", "0",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=600, check=False)
+            if result.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
+                detail = (result.stderr or result.stdout or "FFmpeg could not create the proxy.").strip()
+                raise RuntimeError(detail[-800:])
+            temporary.replace(proxy)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {
+            "sourceFile": f"media/{proxy.name}",
+            "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(proxy.name)}",
+            "cached": False,
+        }
+
     def export(self, project_id: str, files: list[dict[str, Any]], open_folder: bool = False) -> dict[str, Any]:
         folder = self.folder(project_id)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -483,6 +542,9 @@ class ProjectRepository:
                     filename = urllib.parse.quote(source_file.name)
                     asset["src"] = f"/api/projects/{project_id}/media/{filename}"
                     asset["mimeType"] = mime_type
+                    proxy = source_file.parent / f"{source_file.stem}.scrub.mp4"
+                    if proxy.exists() and proxy.stat().st_size > 0:
+                        asset["scrubProxySrc"] = f"/api/projects/{project_id}/media/{urllib.parse.quote(proxy.name)}"
                 else:
                     asset["src"] = f"data:{mime_type};base64,{base64.b64encode(source_file.read_bytes()).decode('ascii')}"
                 asset.pop("mediaError", None)
@@ -1213,6 +1275,18 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json(HTTPStatus.CREATED, result)
             return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/videos/scrub-proxy", path)
+        if match:
+            try:
+                result = self.projects.create_scrub_proxy(match.group(1), str(body.get("sourceFile") or ""))
+            except FileNotFoundError as error:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+                return
+            except (OSError, RuntimeError, ValueError) as error:
+                self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
+                return
+            self.send_json(HTTPStatus.CREATED, result)
+            return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs", path)
         if match:
             try: result = self.video_jobs.create(match.group(1), str(body.get("url") or "").strip(), bool(body.get("highestQuality", False)))
@@ -1274,8 +1348,12 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         if not isinstance(snapshot, dict):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "A project snapshot is required."})
             return
+        snapshot_revision = body.get("snapshotRevision")
+        if snapshot_revision is not None and (not isinstance(snapshot_revision, int) or isinstance(snapshot_revision, bool) or snapshot_revision < 0):
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Project snapshot revision is invalid."})
+            return
         try:
-            project = self.projects.save(match.group(1), snapshot)
+            project = self.projects.save(match.group(1), snapshot, snapshot_revision)
         except FileNotFoundError as error:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
             return

@@ -57,10 +57,13 @@
     closedProjectIds: new Set(),
     renamingProjectId: null,
     folderSaveTimer: null,
+    projectSaveRevision: 0,
     history: { past: [], future: [], limit: 80 },
     saveTimer: null,
     database: null,
     videoJobs: new Map(),
+    videoProxyJobs: new Map(),
+    videoFilmstripCache: new Map(),
   };
 
   const els = {
@@ -72,10 +75,13 @@
     fileInput: document.querySelector("#fileInput"),
     emptyImportButton: document.querySelector("#emptyImportButton"),
     fitButton: document.querySelector("#fitButton"),
+    toolbarFitButton: document.querySelector("#toolbarFitButton"),
     undoButton: document.querySelector("#undoButton"),
     redoButton: document.querySelector("#redoButton"),
     clearButton: document.querySelector("#clearButton"),
     settingsButton: document.querySelector("#settingsButton"),
+    toolbarSettingsButton: document.querySelector("#toolbarSettingsButton"),
+    collapseToolbarButton: document.querySelector("#collapseToolbarButton"),
     exportButton: document.querySelector("#exportButton"),
     previewButton: document.querySelector("#previewButton"),
     mockDraftButton: document.querySelector("#mockDraftButton"),
@@ -96,6 +102,10 @@
     expandPanelButton: document.querySelector("#expandPanelButton"),
     objectiveInput: document.querySelector("#objectiveInput"),
     formatInput: document.querySelector("#formatInput"),
+    saveInstructionTemplateButton: document.querySelector("#saveInstructionTemplateButton"),
+    importInstructionTemplateButton: document.querySelector("#importInstructionTemplateButton"),
+    instructionTemplateFileInput: document.querySelector("#instructionTemplateFileInput"),
+    instructionTemplateShelf: document.querySelector("#instructionTemplateShelf"),
     referenceList: document.querySelector("#referenceList"),
     cropCount: document.querySelector("#cropCount"),
     promptOutputBlock: document.querySelector("#promptOutputBlock"),
@@ -159,6 +169,11 @@
     const pixelsWide = Math.round(Number(width) || 0);
     const pixelsHigh = Math.round(Number(height) || 0);
     return pixelsWide > 0 && pixelsHigh > 0 ? `${pixelsWide}×${pixelsHigh}` : "Resolution unavailable";
+  }
+
+  function formatVideoTime(seconds) {
+    const value = Math.max(0, Number(seconds) || 0);
+    return `${formatDuration(value)}.${String(Math.floor((value % 1) * 1000)).padStart(3, "0")}`;
   }
 
   function titleCase(value) {
@@ -435,6 +450,13 @@
     }
   }
 
+  function persistProjectImmediately() {
+    clearTimeout(state.folderSaveTimer);
+    if (!state.currentProject) return;
+    els.saveText.textContent = "Saving to project…";
+    void saveCurrentProject({ quiet: true, refresh: false });
+  }
+
   async function restoreProject() {
     try {
       const database = await openProjectDatabase();
@@ -597,6 +619,7 @@
         name,
         src,
         sourceFile: options.sourceFile || null,
+        scrubProxySrc: options.scrubProxySrc || null,
         sourceUrl: options.sourceUrl || null,
         sourceTitle: options.sourceTitle || name,
         sourceExtractor: options.sourceExtractor || null,
@@ -621,6 +644,7 @@
       selectItem({ type: "asset", assetId: asset.id });
       updateEmptyState();
       pushHistory(before);
+      ensureVideoScrubProxy(asset);
       setStatus("Video added · press R to describe how to use the whole clip");
     };
     video.onerror = () => setStatus(`Could not load video: ${name}`);
@@ -953,6 +977,32 @@
     return video;
   }
 
+  async function ensureVideoScrubProxy(asset) {
+    const projectId = state.currentProject?.id;
+    if (!projectId || !asset?.sourceFile || asset.scrubProxySrc) return asset?.scrubProxySrc || null;
+    const key = `${projectId}:${asset.sourceFile}`;
+    if (state.videoProxyJobs.has(key)) return state.videoProxyJobs.get(key);
+    const job = (async () => {
+      try {
+        const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/videos/scrub-proxy`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sourceFile: asset.sourceFile }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.src) return null;
+        asset.scrubProxySrc = result.src;
+        return result.src;
+      } catch {
+        return null;
+      } finally {
+        state.videoProxyJobs.delete(key);
+      }
+    })();
+    state.videoProxyJobs.set(key, job);
+    return job;
+  }
+
   async function seekVideo(video, time) {
     const duration = Number.isFinite(video.duration) ? video.duration : 0;
     const target = clamp(Number(time) || 0, 0, Math.max(0, duration - 0.04));
@@ -979,7 +1029,11 @@
       await seekVideo(video, time);
       const highestQuality = state.exportPreferences.highestQualityMedia;
       const canvas = drawVideoIntoCanvas(video, highestQuality ? Number.POSITIVE_INFINITY : 1280);
-      return canvas.toDataURL(highestQuality ? "image/png" : "image/jpeg", highestQuality ? undefined : 0.92);
+      return {
+        dataUrl: canvas.toDataURL(highestQuality ? "image/png" : "image/jpeg", highestQuality ? undefined : 0.92),
+        width: canvas.width,
+        height: canvas.height,
+      };
     } finally {
       video.removeAttribute("src");
       video.load();
@@ -1023,21 +1077,26 @@
     const times = currentTime == null
       ? Array.from({ length: count }, (_, index) => asset.duration > 0 ? (asset.duration * (index + 0.5)) / count : 0)
       : [currentTime];
-    setStatus(`Extracting ${times.length} frame${times.length === 1 ? "" : "s"} from ${asset.name}â€¦`);
+    setStatus(`Extracting ${times.length} frame${times.length === 1 ? "" : "s"} from ${asset.name}…`);
     try {
+      const exportedFrames = [];
       for (let index = 0; index < times.length; index += 1) {
         const time = times[index];
-        const dataUrl = await captureVideoFrame(asset, time);
+        const frame = await captureVideoFrame(asset, time);
         const baseName = asset.name.replace(/\.[^.]+$/, "") || "Video";
-        addImage(dataUrl, `${baseName} · ${formatDuration(time)}.${state.exportPreferences.highestQualityMedia ? "png" : "jpg"}`, {
+        const name = `${baseName} · ${formatVideoTime(time)}.${state.exportPreferences.highestQualityMedia ? "png" : "jpg"}`;
+        addImage(frame.dataUrl, name, {
           sourceVideoId: asset.id,
           sourceTimestampMs: Math.round(time * 1000),
         });
+        exportedFrames.push({ name, time, width: frame.width, height: frame.height });
       }
       setStatus(`${times.length} frame${times.length === 1 ? "" : "s"} extracted as image references`);
+      return { ok: true, frames: exportedFrames };
     } catch (error) {
       console.error(error);
       setStatus(error.message || "Frame extraction failed");
+      return { ok: false, error };
     }
   }
 
@@ -1180,11 +1239,22 @@
         els.selectionDetails.innerHTML = `
           <h2 class="selection-title">Video</h2>
           <video class="selection-video-preview" controls muted playsinline preload="metadata"></video>
+          <div class="video-frame-scrubber" aria-label="Frame preview">
+            <div class="video-frame-scrubber-header"><strong>Selected frame</strong><output data-field="frame-time">0:00.000</output></div>
+            <div class="video-frame-selection">
+              <img class="video-frame-thumbnail" data-field="frame-thumbnail" alt="Selected video frame preview" />
+              <button class="button secondary" data-action="capture-frame" type="button">Export frame</button>
+            </div>
+            <div class="video-frame-scrubber-controls">
+              <input data-field="frame-timeline" type="range" min="0" max="0" value="0" step="0.001" aria-label="Video timeline" />
+            </div>
+            <small>Drag to preview · use ← → for frame steps · export uses this exact time</small>
+          </div>
           <div class="selection-field"><label>Name</label><input data-field="asset-name" value="${escapeAttribute(asset.name)}" /></div>
           <div class="selection-field"><label>Whole-video instruction</label><textarea data-field="video-instruction" rows="3" placeholder="Use its camera movement and pacing">${escapeHtml(asset.videoInstruction || "")}</textarea></div>
           <p class="muted">${formatDuration(asset.duration)} · ${asset.naturalWidth}×${asset.naturalHeight} · the full video is the reference.</p>
           <div class="video-actions">
-            <button class="button secondary" data-action="capture-frame" type="button">Capture current frame</button>
+            <button class="button primary" data-action="open-frame-picker" type="button">Open frame picker</button>
             <button class="button secondary" data-action="annotate-video" type="button">Edit instruction</button>
           </div>
           <div class="selection-field">
@@ -1200,6 +1270,41 @@
         `;
         const preview = els.selectionDetails.querySelector(".selection-video-preview");
         preview.src = asset.src;
+        const timeline = els.selectionDetails.querySelector('[data-field="frame-timeline"]');
+        const frameTime = els.selectionDetails.querySelector('[data-field="frame-time"]');
+        const frameThumbnail = els.selectionDetails.querySelector('[data-field="frame-thumbnail"]');
+        const renderFrameThumbnail = () => {
+          if (preview.readyState < 2 || !preview.videoWidth || !preview.videoHeight) return;
+          frameThumbnail.src = drawVideoIntoCanvas(preview, 240).toDataURL("image/jpeg", 0.82);
+        };
+        const syncFramePreview = () => {
+          const time = Number(preview.currentTime) || 0;
+          timeline.value = String(time);
+          frameTime.value = formatVideoTime(time);
+        };
+        preview.addEventListener("loadedmetadata", () => {
+          timeline.max = String(Number.isFinite(preview.duration) ? preview.duration : asset.duration || 0);
+          syncFramePreview();
+        });
+        preview.addEventListener("timeupdate", syncFramePreview);
+        preview.addEventListener("seeked", () => { syncFramePreview(); renderFrameThumbnail(); });
+        preview.addEventListener("loadeddata", renderFrameThumbnail, { once: true });
+        timeline.addEventListener("input", () => {
+          preview.pause();
+          preview.currentTime = Number(timeline.value) || 0;
+          frameTime.value = formatVideoTime(timeline.value);
+        });
+        const stepFrame = (direction) => {
+          preview.pause();
+          const duration = Number.isFinite(preview.duration) ? preview.duration : asset.duration || 0;
+          preview.currentTime = clamp((preview.currentTime || 0) + direction / 30, 0, duration);
+        };
+        timeline.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+            event.preventDefault();
+            stepFrame(event.key === "ArrowLeft" ? -1 : 1);
+          }
+        });
         const nameInput = els.selectionDetails.querySelector('[data-field="asset-name"]');
         const instructionInput = els.selectionDetails.querySelector('[data-field="video-instruction"]');
         let beforeName = null;
@@ -1228,6 +1333,9 @@
         els.selectionDetails.querySelector('[data-action="annotate-video"]').addEventListener("click", () => {
           openVideoInstructionInput(asset, { before: captureSnapshot() });
         });
+        els.selectionDetails.querySelector('[data-action="open-frame-picker"]').addEventListener("click", () => {
+          openVideoFrameViewer(asset);
+        });
         els.selectionDetails.querySelector('[data-action="extract-frames"]').addEventListener("click", () => {
           const count = Number(els.selectionDetails.querySelector('[data-field="frame-count"]').value) || 8;
           extractVideoFrames(asset, count);
@@ -1236,6 +1344,10 @@
       }
       els.selectionDetails.innerHTML = `
         <h2 class="selection-title">Image</h2>
+        <div class="selection-media-card">
+          <img src="${escapeAttribute(asset.src)}" alt="${escapeAttribute(asset.name)} preview" />
+          <div><strong>${formatVideoResolution(asset.naturalWidth, asset.naturalHeight)}</strong><span>Source image</span></div>
+        </div>
         <div class="selection-field"><label>Name</label><input data-field="asset-name" value="${escapeAttribute(asset.name)}" /></div>
         ${asset.mediaError ? `<p class="selection-media-error">${escapeHtml(asset.mediaError)}</p>` : ""}
         <p class="muted">${asset.annotations.length} annotation${asset.annotations.length === 1 ? "" : "s"}</p>
@@ -1254,12 +1366,22 @@
     const result = findAnnotation(selected.annotationId);
     if (!result) return;
     const { asset, annotation } = result;
+    const cropWidth = Math.max(1, Math.round((asset.naturalWidth || asset.width) * annotation.width));
+    const cropHeight = Math.max(1, Math.round((asset.naturalHeight || asset.height) * annotation.height));
     els.selectionDetails.innerHTML = `
       <h2 class="selection-title">${annotation.letter} · ${escapeHtml(annotation.label)}</h2>
+      <div class="selection-media-card annotation-selection-preview">
+        <img data-field="annotation-preview" alt="${escapeAttribute(annotation.label)} crop preview" />
+        <div><strong>${formatVideoResolution(cropWidth, cropHeight)}</strong><span>Crop from ${escapeHtml(asset.name)}</span></div>
+      </div>
       <div class="selection-field"><label>Raw instruction</label><input data-field="raw" value="${escapeAttribute(annotation.rawInstruction)}" /></div>
       <div class="selection-field"><label>Label</label><input data-field="label" value="${escapeAttribute(annotation.label)}" /></div>
     `;
-    els.selectionDetails.querySelectorAll("[data-field]").forEach((input) => {
+    const annotationPreview = els.selectionDetails.querySelector('[data-field="annotation-preview"]');
+    cropAnnotation(asset, annotation).then((src) => {
+      if (state.selected?.annotationId === annotation.id && annotationPreview.isConnected) annotationPreview.src = src;
+    }).catch(() => {});
+    els.selectionDetails.querySelectorAll("input[data-field]").forEach((input) => {
       let beforeEdit = null;
       input.addEventListener("focus", () => { beforeEdit = captureSnapshot(); });
       input.addEventListener("input", () => {
@@ -1295,6 +1417,72 @@
 
   function escapeAttribute(value) {
     return escapeHtml(value);
+  }
+
+  const INSTRUCTION_TEMPLATE_KEY = "ai-canvas-instruction-templates-v1";
+
+  function loadInstructionTemplates() {
+    try {
+      const templates = JSON.parse(localStorage.getItem(INSTRUCTION_TEMPLATE_KEY) || "[]");
+      return Array.isArray(templates) ? templates.filter((item) => item?.name && item?.content) : [];
+    } catch { return []; }
+  }
+
+  function storeInstructionTemplates(templates) {
+    localStorage.setItem(INSTRUCTION_TEMPLATE_KEY, JSON.stringify(templates.slice(0, 40)));
+    renderInstructionTemplates();
+  }
+
+  function applyInstructionTemplate(content) {
+    els.formatInput.value = String(content || "");
+    invalidateAIDraft("Drafting instructions changed. Regenerate before exporting.");
+    scheduleSave();
+    els.formatInput.focus();
+    setStatus("Prompt instruction template applied");
+  }
+
+  function saveInstructionTemplate(name, content) {
+    const cleanName = String(name || "").trim().slice(0, 80);
+    const cleanContent = String(content || "").trim();
+    if (!cleanName || !cleanContent) return false;
+    const templates = loadInstructionTemplates();
+    const existing = templates.findIndex((item) => item.name.toLowerCase() === cleanName.toLowerCase());
+    const record = { id: existing >= 0 ? templates[existing].id : uid("template"), name: cleanName, content: cleanContent };
+    if (existing >= 0) templates.splice(existing, 1, record);
+    else templates.unshift(record);
+    storeInstructionTemplates(templates);
+    return true;
+  }
+
+  async function importInstructionTemplateFiles(files) {
+    for (const file of [...files]) {
+      if (!/\.(md|txt)$/i.test(file.name) && !["text/plain", "text/markdown"].includes(file.type)) continue;
+      const content = await file.text();
+      const name = file.name.replace(/\.(md|txt)$/i, "") || "Imported instructions";
+      saveInstructionTemplate(name, content);
+    }
+    setStatus("Prompt instruction templates imported");
+  }
+
+  function renderInstructionTemplates() {
+    const templates = loadInstructionTemplates();
+    els.instructionTemplateShelf.innerHTML = templates.length ? "" : `<span class="template-empty">Save or drop a .md/.txt template here</span>`;
+    templates.forEach((template) => {
+      const item = document.createElement("div");
+      item.className = "instruction-template";
+      item.draggable = true;
+      item.innerHTML = `<button type="button" title="Apply ${escapeAttribute(template.name)}">${escapeHtml(template.name)}</button><button type="button" class="instruction-template-remove" aria-label="Delete ${escapeAttribute(template.name)}">×</button>`;
+      item.querySelector("button").addEventListener("click", () => applyInstructionTemplate(template.content));
+      item.querySelector(".instruction-template-remove").addEventListener("click", () => {
+        storeInstructionTemplates(loadInstructionTemplates().filter((entry) => entry.id !== template.id));
+      });
+      item.addEventListener("dragstart", (event) => {
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData("text/plain", template.content);
+        event.dataTransfer.setData("application/x-ai-canvas-template", template.id);
+      });
+      els.instructionTemplateShelf.append(item);
+    });
   }
 
   function buildPromptText() {
@@ -1807,13 +1995,15 @@
     const targetProjectId = state.currentProject.id;
     const targetProjectName = state.currentProject.name;
     const snapshot = captureSnapshot();
+    const snapshotRevision = Math.max(Date.now(), state.projectSaveRevision + 1);
+    state.projectSaveRevision = snapshotRevision;
     els.saveProjectButton.disabled = true;
     els.saveProjectButton.textContent = "Saving…";
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(targetProjectId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ snapshot }),
+        body: JSON.stringify({ snapshot, snapshotRevision }),
       });
       const project = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(project.error || "Project save failed");
@@ -1919,6 +2109,7 @@
       state.closedProjectIds.delete(project.id);
       setCurrentProject(project);
       applySnapshot(project.snapshot || {}, { save: false, preserveProviderSettings: true });
+      state.assets.filter((asset) => asset.type === "video").forEach((asset) => { ensureVideoScrubProxy(asset); });
       await restoreVideoJobs(project.id);
       updateHistoryButtons();
       els.saveText.textContent = `Saved to ${project.name}`;
@@ -2065,6 +2256,14 @@
     const references = getAllCompiledReferences();
     if (!references.length) {
       setStatus("Annotate at least one reference crop first");
+      return;
+    }
+    if (state.mockMode) {
+      const message = "AI Canvas is running in local test mode. Restart it with Restart-AI-CanvasServer.cmd, refresh this page, then draft again.";
+      state.lastDraftError = message;
+      renderPromptState();
+      setProviderConnection("error", "Local test mode", message);
+      setStatus(message);
       return;
     }
     if (els.apiKeyInput.value.trim() && !(await saveProviderCredential())) return;
@@ -2326,6 +2525,12 @@
     els.expandPanelButton.hidden = !collapsed;
   }
 
+  function toggleToolbar(collapsed) {
+    els.shell.classList.toggle("toolbar-collapsed", collapsed);
+    els.collapseToolbarButton.setAttribute("aria-label", collapsed ? "Expand tools" : "Collapse tools");
+    els.collapseToolbarButton.title = collapsed ? "Expand tools" : "Collapse tools";
+  }
+
   function fitAll() {
     if (!state.assets.length) {
       state.scale = 1;
@@ -2384,6 +2589,7 @@
     updateEmptyState();
     renderReferenceList();
     pushHistory(before);
+    persistProjectImmediately();
     setStatus("Deleted");
   }
 
@@ -2920,12 +3126,319 @@
   els.workspace.addEventListener("pointerup", finishPointerInteraction);
   els.workspace.addEventListener("pointercancel", finishPointerInteraction);
 
-  els.workspace.addEventListener("dblclick", (event) => {
-    if (event.ctrlKey) {
+  function openVideoFrameViewer(asset) {
+    ensureVideoScrubProxy(asset);
+    const viewer = document.querySelector("#videoFrameViewer");
+    const video = viewer.querySelector('[data-field="viewer-video"]');
+    const videoStage = viewer.querySelector(".video-frame-viewer-stage");
+    const time = viewer.querySelector('[data-field="viewer-time"]');
+    const play = viewer.querySelector('[data-action="viewer-play"]');
+    const exportFrameButton = viewer.querySelector('[data-action="viewer-export-frame"]');
+    const exportFirstFrameButton = viewer.querySelector('[data-action="viewer-export-first-frame"]');
+    const exportLastFrameButton = viewer.querySelector('[data-action="viewer-export-last-frame"]');
+    const exportStatus = viewer.querySelector('[data-field="viewer-export-status"]');
+    const exportButtons = [exportFirstFrameButton, exportFrameButton, exportLastFrameButton];
+    const filmstrip = viewer.querySelector('[data-field="viewer-filmstrip"]');
+    const rangeLabel = viewer.querySelector('[data-field="viewer-range"]');
+    const session = (Number(viewer.dataset.session) || 0) + 1;
+    let timelineZoom = 0;
+    let zoomRenderTimer = null;
+    let timelineGeneration = 0;
+    let timelineStart = 0;
+    let timelineEnd = 0;
+    let suppressScroll = false;
+    let scrollFrame = null;
+    let pendingSeek = null;
+    let seekFrame = null;
+    let dragStart = null;
+    let ignoreClickUntil = 0;
+    let exportingFrame = false;
+    const canvasVideo = els.scene.querySelector(`[data-asset-id="${asset.id}"] video`);
+    const openingTime = Number(canvasVideo?.currentTime) || 0;
+    viewer.dataset.session = String(session);
+    const isCurrent = () => viewer.dataset.session === String(session) && !viewer.hidden;
+    const fitVideoToStage = () => {
+      if (!video.videoWidth || !video.videoHeight) return;
+      const stageRect = videoStage.getBoundingClientRect();
+      const sourceRatio = video.videoWidth / video.videoHeight;
+      const stageRatio = stageRect.width / Math.max(1, stageRect.height);
+      const width = stageRatio > sourceRatio ? stageRect.height * sourceRatio : stageRect.width;
+      const height = stageRatio > sourceRatio ? stageRect.height : stageRect.width / sourceRatio;
+      video.style.width = `${Math.max(1, Math.floor(width))}px`;
+      video.style.height = `${Math.max(1, Math.floor(height))}px`;
+    };
+    const close = () => {
+      viewer.dataset.session = String(session + 1);
+      timelineGeneration += 1;
+      if (scrollFrame) cancelAnimationFrame(scrollFrame);
+      if (seekFrame) cancelAnimationFrame(seekFrame);
+      clearTimeout(zoomRenderTimer);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      window.removeEventListener("resize", fitVideoToStage);
+      viewer.hidden = true;
+    };
+    const timelineWindow = (duration) => {
+      const center = clamp(video.currentTime || openingTime, 0, duration);
+      const minimumSpan = Math.min(duration, 1.2);
+      const span = duration <= 0 ? 0 : duration * Math.pow(minimumSpan / duration, timelineZoom);
+      const start = clamp(center - span / 2, 0, Math.max(0, duration - span));
+      return {
+        start,
+        end: Math.min(duration, start + span),
+        count: Math.round(12 + timelineZoom * 10),
+        label: timelineZoom < .04 ? "Entire video" : span <= 1.25 ? "Frame precision" : `${span.toFixed(span < 10 ? 1 : 0)} second window`,
+      };
+    };
+    const scrollToSelectedTime = (behavior = "auto") => {
+      const span = timelineEnd - timelineStart;
+      if (!span || filmstrip.scrollWidth <= filmstrip.clientWidth) return;
+      const progress = clamp(((video.currentTime || 0) - timelineStart) / span, 0, 1);
+      suppressScroll = true;
+      filmstrip.scrollTo({ left: progress * (filmstrip.scrollWidth - filmstrip.clientWidth), behavior });
+      requestAnimationFrame(() => requestAnimationFrame(() => { suppressScroll = false; }));
+    };
+    const sync = () => {
+      time.value = formatVideoTime(video.currentTime);
+      const buttons = [...filmstrip.querySelectorAll(".video-filmstrip-frame")];
+      let closest = null;
+      buttons.forEach((button) => {
+        const active = !closest || Math.abs(Number(button.dataset.time) - video.currentTime) < Math.abs(Number(closest.dataset.time) - video.currentTime);
+        button.classList.toggle("active", active);
+        if (active) closest = button;
+      });
+    };
+    const seekTo = (value, { precise = false } = {}) => {
+      const duration = video.duration || asset.duration || 0;
+      pendingSeek = clamp(Number(value) || 0, 0, duration);
+      if (seekFrame) return;
+      seekFrame = requestAnimationFrame(() => {
+        seekFrame = null;
+        if (!isCurrent()) return;
+        const target = pendingSeek;
+        exportButtons.forEach((button) => { button.disabled = true; });
+        time.value = formatVideoTime(target);
+        video.currentTime = target;
+      });
+    };
+    const stepFrame = (direction) => {
+      video.pause();
+      seekTo((video.currentTime || 0) + direction / 30, { precise: true });
+    };
+    const exportFrameAt = async (targetTime, label) => {
+      if (exportingFrame) return;
+      if (video.seeking && label === "current frame") {
+        exportStatus.value = "Wait for the selected frame to finish loading";
+        exportStatus.dataset.state = "error";
+        return;
+      }
+      exportingFrame = true;
+      exportButtons.forEach((button) => { button.disabled = true; });
+      exportStatus.value = `Exporting ${label}…`;
+      exportStatus.dataset.state = "busy";
+      const result = await extractVideoFrames(asset, 1, targetTime);
+      if (!isCurrent()) return;
+      exportingFrame = false;
+      exportButtons.forEach((button) => { button.disabled = false; });
+      if (result?.ok && result.frames?.[0]) {
+        const frame = result.frames[0];
+        exportStatus.value = `✓ ${label[0].toUpperCase()}${label.slice(1)} added · ${frame.width}×${frame.height}`;
+        exportStatus.dataset.state = "success";
+      } else {
+        exportStatus.value = result?.error?.message || `Could not export ${label}`;
+        exportStatus.dataset.state = "error";
+      }
+    };
+    viewer.hidden = false;
+    viewer.tabIndex = -1;
+    viewer.focus();
+    exportStatus.value = "";
+    delete exportStatus.dataset.state;
+    exportButtons.forEach((button) => { button.disabled = false; });
+    viewer.querySelector('[data-field="viewer-title"]').textContent = asset.name || "Select a frame";
+    viewer.querySelector('[data-field="viewer-resolution"]').textContent = formatVideoResolution(asset.naturalWidth, asset.naturalHeight);
+    viewer.querySelector('[data-field="viewer-duration"]').textContent = formatDuration(asset.duration);
+    video.onplay = () => { play.textContent = "❚❚"; play.setAttribute("aria-label", "Pause video"); };
+    video.onpause = () => { play.textContent = "▶"; play.setAttribute("aria-label", "Play video"); };
+    play.onclick = () => { if (video.paused) video.play(); else video.pause(); };
+    viewer.onkeydown = (event) => {
+      if (event.key === "Escape") close();
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        stepFrame(event.key === "ArrowLeft" ? -1 : 1);
+      }
+      if (event.code === "Space" && event.target === viewer) { event.preventDefault(); play.click(); }
+    };
+    const appendFilmstripFrame = (frameTime, previewSrc) => {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "video-filmstrip-frame"; button.dataset.time = String(frameTime);
+      if (previewSrc) {
+        const image = document.createElement("img"); image.alt = `Frame at ${formatVideoTime(frameTime)}`; image.src = previewSrc;
+        button.append(image);
+      } else button.classList.add("loading");
+      button.onclick = () => {
+        if (Date.now() < ignoreClickUntil) return;
+        video.pause();
+        seekTo(frameTime, { precise: true });
+        suppressScroll = true;
+        button.scrollIntoView({ behavior: "auto", inline: "center", block: "nearest" });
+        requestAnimationFrame(() => requestAnimationFrame(() => { suppressScroll = false; }));
+      };
+      filmstrip.append(button);
+      return button;
+    };
+    const paintVisibleFrame = () => {
+      if (video.readyState < 2) return;
+      const buttons = [...filmstrip.querySelectorAll(".video-filmstrip-frame")];
+      if (!buttons.length) return;
+      const closest = buttons.reduce((best, button) => !best || Math.abs(Number(button.dataset.time) - video.currentTime) < Math.abs(Number(best.dataset.time) - video.currentTime) ? button : best, null);
+      if (!closest || closest.querySelector("img")) return;
+      try {
+        const previewSrc = drawVideoIntoCanvas(video, 128).toDataURL("image/jpeg", 0.66);
+        const image = document.createElement("img");
+        image.alt = `Current frame at ${formatVideoTime(video.currentTime)}`;
+        image.src = previewSrc;
+        closest.classList.remove("loading");
+        closest.append(image);
+      } catch { /* The background thumbnail decoder will fill it if the frame is not drawable yet. */ }
+    };
+    const renderFilmstrip = async () => {
+      const duration = video.duration || asset.duration || 0;
+      if (!duration || !isCurrent()) return;
+      const generation = ++timelineGeneration;
+      const window = timelineWindow(duration);
+      timelineStart = window.start;
+      timelineEnd = window.end;
+      rangeLabel.textContent = window.label;
+      const zoomBucket = Math.round(timelineZoom * 20);
+      const anchor = timelineZoom < .04 ? "all" : `${window.start.toFixed(2)}-${window.end.toFixed(2)}`;
+      const key = `${asset.id}:zoom-${zoomBucket}:${anchor}`;
+      const cachedFrames = state.videoFilmstripCache.get(key);
+      filmstrip.innerHTML = "";
+      const targets = Array.from({ length: window.count }, (_, index) => window.start + ((window.end - window.start) * index) / Math.max(1, window.count - 1));
+      if (cachedFrames) {
+        cachedFrames.forEach((frame) => appendFilmstripFrame(frame.time, frame.src));
+        sync();
+        requestAnimationFrame(() => scrollToSelectedTime());
+        return;
+      }
+      const slots = targets.map((frameTime) => appendFilmstripFrame(frameTime, null));
+      paintVisibleFrame();
+      let source;
+      const frames = new Array(targets.length);
+      try {
+        if (video.readyState >= 2) {
+          const closestIndex = targets.reduce((best, frameTime, index) => Math.abs(frameTime - video.currentTime) < Math.abs(targets[best] - video.currentTime) ? index : best, 0);
+          const immediateSrc = drawVideoIntoCanvas(video, 128).toDataURL("image/jpeg", 0.66);
+          const immediateSlot = slots[closestIndex];
+          immediateSlot.classList.remove("loading");
+          const immediateImage = document.createElement("img"); immediateImage.alt = `Frame at ${formatVideoTime(targets[closestIndex])}`; immediateImage.src = immediateSrc;
+          immediateSlot.append(immediateImage);
+        }
+        requestAnimationFrame(() => scrollToSelectedTime());
+        source = await loadVideoForFrames({ ...asset, src: asset.scrubProxySrc || asset.src });
+        const priority = targets.map((_, index) => index).sort((a, b) => Math.abs(targets[a] - video.currentTime) - Math.abs(targets[b] - video.currentTime));
+        for (const index of priority) {
+          if (!isCurrent() || generation !== timelineGeneration) return;
+          const frameTime = targets[index];
+          await seekVideo(source, frameTime);
+          if (!isCurrent() || generation !== timelineGeneration) return;
+          const previewSrc = drawVideoIntoCanvas(source, 128).toDataURL("image/jpeg", 0.66);
+          frames[index] = { time: frameTime, src: previewSrc };
+          const slot = slots[index];
+          slot.classList.remove("loading");
+          slot.replaceChildren();
+          const image = document.createElement("img"); image.alt = `Frame at ${formatVideoTime(frameTime)}`; image.src = previewSrc;
+          slot.append(image);
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        state.videoFilmstripCache.set(key, frames.filter(Boolean));
+        sync();
+      } finally {
+        if (source) { source.removeAttribute("src"); source.load(); }
+      }
+    };
+    filmstrip.onscroll = () => {
+      if (suppressScroll || scrollFrame) return;
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = null;
+        if (!isCurrent()) return;
+        const maximum = Math.max(1, filmstrip.scrollWidth - filmstrip.clientWidth);
+        const selectedTime = timelineStart + (filmstrip.scrollLeft / maximum) * (timelineEnd - timelineStart);
+        video.pause();
+        seekTo(selectedTime);
+      });
+    };
+    filmstrip.onpointerdown = (event) => {
+      dragStart = { pointerId: event.pointerId, x: event.clientX, scrollLeft: filmstrip.scrollLeft };
+      filmstrip.classList.add("dragging");
+      filmstrip.setPointerCapture?.(event.pointerId);
+    };
+    filmstrip.onpointermove = (event) => {
+      if (!dragStart || event.pointerId !== dragStart.pointerId) return;
+      const distance = event.clientX - dragStart.x;
+      if (Math.abs(distance) > 3) {
+        ignoreClickUntil = Date.now() + 120;
+        filmstrip.scrollLeft = dragStart.scrollLeft - distance;
+      }
+    };
+    filmstrip.onpointerup = filmstrip.onpointercancel = () => {
+      dragStart = null;
+      filmstrip.classList.remove("dragging");
+      if (pendingSeek != null) seekTo(pendingSeek, { precise: true });
+    };
+    filmstrip.onwheel = (event) => {
       event.preventDefault();
-      els.fileInput.click();
-      setStatus("Choose one or more reference images");
-      return;
+      if (event.ctrlKey || event.metaKey) {
+        timelineZoom = clamp(timelineZoom - event.deltaY * .0025, 0, 1);
+        clearTimeout(zoomRenderTimer);
+        zoomRenderTimer = setTimeout(renderFilmstrip, 55);
+        rangeLabel.textContent = timelineZoom < .04 ? "Entire video" : "Adjusting timeline scale";
+        return;
+      }
+      filmstrip.scrollLeft += event.deltaX || event.deltaY;
+    };
+    filmstrip.ondblclick = () => {
+      timelineZoom = clamp(timelineZoom + .28, 0, 1);
+      renderFilmstrip();
+    };
+    viewer.querySelector('[data-action="viewer-previous-frame"]').onclick = () => stepFrame(-1);
+    viewer.querySelector('[data-action="viewer-next-frame"]').onclick = () => stepFrame(1);
+    video.ontimeupdate = () => {
+      sync();
+      if (!video.paused && !dragStart) scrollToSelectedTime();
+    };
+    video.onseeked = () => {
+      sync();
+      if (!exportingFrame) exportButtons.forEach((button) => { button.disabled = false; });
+    };
+    video.onloadeddata = paintVisibleFrame;
+    video.onloadedmetadata = () => {
+      viewer.querySelector('[data-field="viewer-resolution"]').textContent = formatVideoResolution(asset.naturalWidth || video.videoWidth, asset.naturalHeight || video.videoHeight);
+      viewer.querySelector('[data-field="viewer-duration"]').textContent = formatDuration(video.duration || asset.duration);
+      if (video.videoWidth && video.videoHeight) video.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+      fitVideoToStage();
+      video.currentTime = clamp(openingTime, 0, video.duration || asset.duration || 0);
+      renderFilmstrip();
+    };
+    video.src = asset.scrubProxySrc || asset.src;
+    window.addEventListener("resize", fitVideoToStage);
+    exportFrameButton.onclick = () => exportFrameAt(video.currentTime || 0, "current frame");
+    exportFirstFrameButton.onclick = () => exportFrameAt(0, "first frame");
+    exportLastFrameButton.onclick = () => {
+      const duration = video.duration || asset.duration || 0;
+      exportFrameAt(Math.max(0, duration - 1 / 30), "last frame");
+    };
+    viewer.querySelector('[data-action="close-frame-viewer"]').onclick = close;
+    viewer.onclick = (event) => { if (event.target === viewer) close(); };
+  }
+
+  els.workspace.addEventListener("dblclick", (event) => {
+    const assetElement = event.target.closest?.(".asset");
+    if (assetElement) {
+      const asset = findAsset(assetElement.dataset.assetId);
+      if (asset?.type === "video") { event.preventDefault(); openVideoFrameViewer(asset); return; }
     }
     const annotationElement = event.target.closest?.(".annotation");
     if (!annotationElement || event.target.closest?.(".transform-handle")) return;
@@ -2933,7 +3446,7 @@
     if (!result) return;
     selectItem({ type: "annotation", assetId: result.asset.id, annotationId: result.annotation.id });
     openAnnotationInput(result.asset, result.annotation, { editing: true, before: captureSnapshot() });
-  });
+  }, { capture: true });
 
   document.addEventListener("paste", (event) => {
     const target = event.target;
@@ -3030,8 +3543,11 @@
     const result = await response.json().catch(() => ({}));
     if (!response.ok) return;
     (result.jobs || []).forEach((job) => {
+      // A completed download is not automatically a canvas asset. The saved
+      // project snapshot is the source of truth: otherwise every reload
+      // resurrects videos the user intentionally removed from the canvas.
+      job.added = state.assets.some((asset) => asset.sourceFile && asset.sourceFile === job.result?.sourceFile);
       state.videoJobs.set(job.id, job);
-      if (job.state === "ready") addCompletedVideo(job);
       if (["queued", "resolving", "downloading", "processing"].includes(job.state)) {
         pollVideoJob(job).catch((error) => { job.state = "failed"; job.error = error.message || "Video download status could not be read"; renderVideoJobs(); });
       }
@@ -3214,11 +3730,14 @@
     els.fileInput.value = "";
   });
   els.fitButton.addEventListener("click", fitAll);
-  els.settingsButton.addEventListener("click", () => {
+  els.toolbarFitButton.addEventListener("click", fitAll);
+  const openSettings = () => {
     setActivePanelTab("settings");
     if (els.shell.classList.contains("panel-collapsed")) togglePanel(false);
     els.aiSettings.open = true;
-  });
+  };
+  els.settingsButton.addEventListener("click", openSettings);
+  els.toolbarSettingsButton.addEventListener("click", openSettings);
   els.clearButton.addEventListener("click", () => {
     if (!state.assets.length) return;
     const before = captureSnapshot();
@@ -3231,6 +3750,7 @@
     renderReferenceList();
     renderSelectionPanel();
     pushHistory(before);
+    persistProjectImmediately();
     setStatus("Canvas cleared");
   });
   els.undoButton.addEventListener("click", undo);
@@ -3270,6 +3790,7 @@
   els.retryDraftButton.addEventListener("click", analyzeAndDraft);
   els.collapsePanelButton.addEventListener("click", () => togglePanel(true));
   els.expandPanelButton.addEventListener("click", () => togglePanel(false));
+  els.collapseToolbarButton.addEventListener("click", () => toggleToolbar(!els.shell.classList.contains("toolbar-collapsed")));
   els.objectiveInput.addEventListener("input", () => {
     invalidateAIDraft("Objective changed. Regenerate before exporting.");
     scheduleSave();
@@ -3277,6 +3798,35 @@
   els.formatInput.addEventListener("input", () => {
     invalidateAIDraft("Drafting instructions changed. Regenerate before exporting.");
     scheduleSave();
+  });
+  els.saveInstructionTemplateButton.addEventListener("click", () => {
+    const content = els.formatInput.value.trim();
+    if (!content) { setStatus("Write prompt drafting instructions before saving a template"); return; }
+    const suggested = content.split(/\r?\n/)[0].slice(0, 42) || "Prompt instructions";
+    if (saveInstructionTemplate(suggested, content)) setStatus(`${suggested} template saved`);
+  });
+  els.importInstructionTemplateButton.addEventListener("click", () => els.instructionTemplateFileInput.click());
+  els.instructionTemplateFileInput.addEventListener("change", async () => {
+    await importInstructionTemplateFiles(els.instructionTemplateFileInput.files || []);
+    els.instructionTemplateFileInput.value = "";
+  });
+  [els.formatInput, els.instructionTemplateShelf].forEach((target) => {
+    target.addEventListener("dragover", (event) => { event.preventDefault(); target.classList.add("drag-over"); });
+    target.addEventListener("dragleave", () => target.classList.remove("drag-over"));
+    target.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      target.classList.remove("drag-over");
+      if (event.dataTransfer.files?.length) {
+        await importInstructionTemplateFiles(event.dataTransfer.files);
+        if (target === els.formatInput) {
+          const latest = loadInstructionTemplates()[0];
+          if (latest) applyInstructionTemplate(latest.content);
+        }
+        return;
+      }
+      const content = event.dataTransfer.getData("text/plain");
+      if (content && target === els.formatInput) applyInstructionTemplate(content);
+    });
   });
   els.modelInput.addEventListener("change", () => {
     state.providerModel = els.modelInput.value;
@@ -3328,6 +3878,7 @@
   renderProviderOptions();
   renderProviderSettings();
   renderExportPreferences();
+  renderInstructionTemplates();
   updateEmptyState();
   renderReferenceList();
   renderProjectTabs();

@@ -12,7 +12,7 @@ py -3 prototype\server.py
 
 Then open `http://127.0.0.1:4173`.
 
-For Windows convenience, use `Restart-AI-CanvasServer.cmd` from the workspace root to stop the server listening on port 4173 and start a fresh mock-AI session. Use `Stop-AI-CanvasServer.cmd` to close it without restarting.
+For Windows convenience, use `Restart-AI-CanvasServer.cmd` from the workspace root to stop the server listening on port 4173 and start the normal provider-enabled app. Use `Stop-AI-CanvasServer.cmd` to close it without restarting.
 
 On startup, the app scans the managed projects root and automatically loads the most recently updated project. If no managed project exists, it creates and loads an `Untitled project` folder. Browser-local recovery is used only when the project service is unavailable or when seeding that first managed project. Pasted and imported images autosave into the active project's `media/` directory.
 

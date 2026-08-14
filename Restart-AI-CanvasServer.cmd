@@ -14,6 +14,6 @@ if not exist "%ROOT%.venv\Scripts\python.exe" (
 )
 
 echo.
-echo Starting AI Canvas at http://127.0.0.1:%PORT% ...
+echo Starting AI Canvas with provider APIs at http://127.0.0.1:%PORT% ...
 cd /d "%ROOT%"
-"%ROOT%.venv\Scripts\python.exe" prototype\server.py --mock-ai
+"%ROOT%.venv\Scripts\python.exe" prototype\server.py

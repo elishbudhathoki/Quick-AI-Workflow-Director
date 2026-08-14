@@ -4,13 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Canvas Interaction Spike</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260814-frame-export-feedback" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
         <div class="brand">
-          <span class="brand-mark">AC</span>
+          <span class="brand-mark" title="AI Canvas logo placeholder" aria-label="AI Canvas logo placeholder">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.2 17.8 12 4.8l5.8 13M8.2 13h7.6M5 20h14" /></svg>
+          </span>
           <div class="brand-copy">
             <strong>AI Canvas</strong>
             <small>Local workspace</small>
@@ -20,11 +22,11 @@
         <nav class="project-tabs-shell" aria-label="Open projects">
           <button id="topCreateProjectButton" class="project-tab-action primary" type="button" title="New project" aria-label="Create project">+</button>
           <div id="projectTabs" class="project-tabs"></div>
-          <button id="openProjectsButton" class="project-tab-action" type="button" title="Browse project folders" aria-label="Open project folders">▤</button>
+          <button id="openProjectsButton" class="project-tab-action" type="button" title="Browse project folders" aria-label="Open project folders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.8 2h9.2v8.8a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7V7.5Z"/><path d="M3.5 7.5V5.7A1.7 1.7 0 0 1 5.2 4h4.1l2 2h7.5a1.7 1.7 0 0 1 1.7 1.7v1.8"/></svg></button>
         </nav>
 
         <div class="topbar-actions">
-          <button id="fitButton" class="button ghost" title="Fit everything in view (0)">Fit</button>
+          <button id="fitButton" class="button ghost legacy-top-action" title="Fit everything in view (0)">Fit</button>
           <button id="settingsButton" class="icon-button settings-icon-button" title="API and model settings" aria-label="Open settings">⚙</button>
           <button id="exportButton" class="button ghost" title="Write prompt, manifest, and crops to a folder">Export package</button>
           <button id="previewButton" class="button primary" title="Analyze reference crops and draft a detailed prompt">Analyze &amp; Draft</button>
@@ -32,32 +34,35 @@
       </header>
 
       <aside class="toolbar" aria-label="Canvas tools">
+        <button id="collapseToolbarButton" class="tool toolbar-collapse" type="button" title="Collapse tools" aria-label="Collapse tools"><span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 7-5 5 5 5"/></svg></span></button>
         <button class="tool active" data-tool="select" title="Select (V)">
-          <span class="tool-icon">↖</span>
+          <span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 13 9-6 1.2L9 19 5 3Z"/></svg></span>
           <span>V</span>
         </button>
         <button class="tool" data-tool="region" title="Region (R)">
-          <span class="tool-icon">▱</span>
+          <span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="6" width="14" height="12" rx="1.5"/></svg></span>
           <span>R</span>
         </button>
         <button class="tool" data-tool="hand" title="Pan (H or hold Space)">
-          <span class="tool-icon">✋</span>
+          <span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 12V7.8a1.5 1.5 0 0 1 3 0v3-5a1.5 1.5 0 0 1 3 0v5.1-4a1.5 1.5 0 0 1 3 0V12l.8-1.6a1.6 1.6 0 0 1 2.8 1.5l-2.6 5.2A5.2 5.2 0 0 1 12.5 20H11a5 5 0 0 1-4.7-3.3L4.4 12a1.5 1.5 0 0 1 2.8-1.1V12Z"/></svg></span>
           <span>H</span>
         </button>
         <div class="toolbar-divider"></div>
         <button id="undoButton" class="tool" title="Undo (Ctrl+Z)" disabled>
-          <span class="tool-icon">↶</span>
+          <span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 5 11l4 4"/><path d="M6 11h7a6 6 0 0 1 6 6"/></svg></span>
           <span>Undo</span>
         </button>
         <button id="redoButton" class="tool" title="Redo (Ctrl+Y)" disabled>
-          <span class="tool-icon">↷</span>
+          <span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 4 4-4 4"/><path d="M18 11h-7a6 6 0 0 0-6 6"/></svg></span>
           <span>Redo</span>
         </button>
         <button id="clearButton" class="tool" title="Clear canvas">
-          <span class="tool-icon">⌫</span>
+          <span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></span>
           <span>Clear</span>
         </button>
         <div class="toolbar-spacer"></div>
+        <button id="toolbarFitButton" class="tool" type="button" title="Fit everything in view (0)" aria-label="Fit everything in view"><span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5m11-5h5v5M9 20H4v-5m11 5h5v-5"/></svg></span><span>Fit</span></button>
+        <button id="toolbarSettingsButton" class="tool" type="button" title="Open settings" aria-label="Open settings"><span class="tool-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.7-1L14.5 3h-5l-.4 3.1a8 8 0 0 0-1.7 1L5 6.1 3 9.5 5 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 1.7 1l.4 3.1h5l.4-3.1a8 8 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z"/></svg></span><span>Settings</span></button>
         <input id="fileInput" type="file" accept="image/*,video/*" multiple hidden />
       </aside>
 
@@ -94,10 +99,18 @@
             <textarea id="objectiveInput" rows="4" placeholder="Create a cinematic fashion portrait…"></textarea>
           </label>
 
-          <label class="field">
-            <span>Prompt drafting instructions</span>
+          <div class="field prompt-template-field">
+            <div class="field-heading-row">
+              <span>Prompt drafting instructions</span>
+              <div>
+                <button id="saveInstructionTemplateButton" class="text-button" type="button">Save template</button>
+                <button id="importInstructionTemplateButton" class="text-button" type="button">Import</button>
+              </div>
+            </div>
             <textarea id="formatInput" rows="4" placeholder="Use separate Character, Wardrobe, Environment, and Lighting sections."></textarea>
-          </label>
+            <input id="instructionTemplateFileInput" type="file" accept=".md,.txt,text/markdown,text/plain" multiple hidden />
+            <div id="instructionTemplateShelf" class="instruction-template-shelf" aria-label="Prompt instruction templates"></div>
+          </div>
 
           <div class="section-heading">
             <span>References</span>
@@ -242,6 +255,50 @@
 
       <button id="expandPanelButton" class="expand-panel" title="Open panel" hidden>‹</button>
 
+      <section id="videoFrameViewer" class="video-frame-viewer" hidden role="dialog" aria-modal="true" aria-label="Video frame preview">
+        <div class="video-frame-viewer-card">
+          <header class="video-frame-viewer-header">
+            <div>
+              <strong data-field="viewer-title">Select a frame</strong>
+              <span><span data-field="viewer-resolution"></span><span class="viewer-meta-separator">•</span><span data-field="viewer-duration">0:00</span></span>
+            </div>
+            <button class="icon-button video-frame-viewer-close" type="button" data-action="close-frame-viewer" aria-label="Close frame picker">×</button>
+          </header>
+          <div class="video-frame-viewer-stage">
+            <video data-field="viewer-video" class="video-frame-viewer-video" muted playsinline preload="auto"></video>
+          </div>
+          <div class="video-frame-viewer-controls">
+            <output data-field="viewer-time">0:00.000</output>
+            <div class="viewer-transport" role="group" aria-label="Frame navigation">
+              <button class="viewer-icon-button" data-action="viewer-previous-frame" type="button" aria-label="Previous frame">‹</button>
+              <button class="viewer-play-button" data-action="viewer-play" type="button" aria-label="Play video">▶</button>
+              <button class="viewer-icon-button" data-action="viewer-next-frame" type="button" aria-label="Next frame">›</button>
+            </div>
+            <div class="viewer-export-area">
+              <div class="viewer-export-actions" role="group" aria-label="Export video frames">
+                <button class="viewer-quick-export" data-action="viewer-export-first-frame" type="button" aria-label="Export first frame" title="Export first frame">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 4.25v11.5M15.5 5.5 8.5 10l7 4.5z"/></svg>
+                </button>
+                <button class="button primary viewer-export-button" data-action="viewer-export-frame" type="button">Export frame</button>
+                <button class="viewer-quick-export" data-action="viewer-export-last-frame" type="button" aria-label="Export last frame" title="Export last frame">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 4.25v11.5M4.5 5.5l7 4.5-7 4.5z"/></svg>
+                </button>
+              </div>
+              <output class="viewer-export-feedback" data-field="viewer-export-status" aria-live="polite"></output>
+            </div>
+          </div>
+          <div class="video-frame-viewer-timeline-tools" aria-label="Timeline zoom">
+            <span data-field="viewer-range">Entire video</span>
+            <span class="viewer-zoom-hint">Scroll to scrub · pinch or Ctrl + wheel to zoom</span>
+          </div>
+          <div class="video-filmstrip-shell" aria-label="Video frame filmstrip">
+            <div class="video-filmstrip-playhead" aria-hidden="true"></div>
+            <div data-field="viewer-filmstrip" class="video-filmstrip"></div>
+          </div>
+          <small>Drag or scroll to scrub · use ← → for exact frame steps · export always uses the full-quality local source</small>
+        </div>
+      </section>
+
       <footer class="statusbar">
         <span id="statusText">Ready</span>
         <span id="saveText">Not saved yet</span>
@@ -250,6 +307,6 @@
       </footer>
     </main>
 
-    <script src="./app.js" defer></script>
+    <script src="./app.js?v=20260814-video-job-restore-fix" defer></script>
   </body>
 </html>
