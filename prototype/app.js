@@ -46,7 +46,7 @@
     providerModels: { openai: "gpt-5.6-terra", gemini: "gemini-3.6-flash" },
     providerId: "openai",
     imageDetail: "auto",
-    exportPreferences: { copyPrompt: true, openFolder: true },
+    exportPreferences: { copyPrompt: true, openFolder: true, highestQualityMedia: false },
     workspacePreferences: { lastActiveProjectId: null, openProjectIds: [] },
     workspaceTabsInitialized: false,
     preferencesSaveTimer: null,
@@ -60,6 +60,7 @@
     history: { past: [], future: [], limit: 80 },
     saveTimer: null,
     database: null,
+    videoJobs: new Map(),
   };
 
   const els = {
@@ -89,6 +90,7 @@
     removeProviderButton: document.querySelector("#removeProviderButton"),
     copyPromptOnExportInput: document.querySelector("#copyPromptOnExportInput"),
     openFolderOnExportInput: document.querySelector("#openFolderOnExportInput"),
+    highestQualityMediaInput: document.querySelector("#highestQualityMediaInput"),
     panel: document.querySelector("#panel"),
     collapsePanelButton: document.querySelector("#collapsePanelButton"),
     expandPanelButton: document.querySelector("#expandPanelButton"),
@@ -125,6 +127,9 @@
     projectList: document.querySelector("#projectList"),
     providerConnection: document.querySelector("#providerConnection"),
     providerConnectionTitle: document.querySelector("#providerConnectionTitle"),
+    videoJobsBlock: document.querySelector("#videoJobsBlock"),
+    videoJobCount: document.querySelector("#videoJobCount"),
+    videoJobList: document.querySelector("#videoJobList"),
   };
 
   function cloneProviderRegistry(providers) {
@@ -148,6 +153,12 @@
     const minutes = Math.floor(value / 60);
     const remaining = Math.floor(value % 60);
     return `${minutes}:${String(remaining).padStart(2, "0")}`;
+  }
+
+  function formatVideoResolution(width, height) {
+    const pixelsWide = Math.round(Number(width) || 0);
+    const pixelsHigh = Math.round(Number(height) || 0);
+    return pixelsWide > 0 && pixelsHigh > 0 ? `${pixelsWide}×${pixelsHigh}` : "Resolution unavailable";
   }
 
   function titleCase(value) {
@@ -743,6 +754,7 @@
     updateEmptyState();
     renderSelectionPanel();
     renderReferenceList();
+    renderVideoJobs();
   }
 
   function findAsset(assetId) {
@@ -965,7 +977,9 @@
     const video = await loadVideoForFrames(asset);
     try {
       await seekVideo(video, time);
-      return drawVideoIntoCanvas(video).toDataURL("image/jpeg", 0.92);
+      const highestQuality = state.exportPreferences.highestQualityMedia;
+      const canvas = drawVideoIntoCanvas(video, highestQuality ? Number.POSITIVE_INFINITY : 1280);
+      return canvas.toDataURL(highestQuality ? "image/png" : "image/jpeg", highestQuality ? undefined : 0.92);
     } finally {
       video.removeAttribute("src");
       video.load();
@@ -1015,7 +1029,7 @@
         const time = times[index];
         const dataUrl = await captureVideoFrame(asset, time);
         const baseName = asset.name.replace(/\.[^.]+$/, "") || "Video";
-        addImage(dataUrl, `${baseName} · ${formatDuration(time)}.jpg`, {
+        addImage(dataUrl, `${baseName} · ${formatDuration(time)}.${state.exportPreferences.highestQualityMedia ? "png" : "jpg"}`, {
           sourceVideoId: asset.id,
           sourceTimestampMs: Math.round(time * 1000),
         });
@@ -1035,7 +1049,7 @@
         const sy = Math.round(annotation.y * source.naturalHeight);
         const sw = Math.max(1, Math.round(annotation.width * source.naturalWidth));
         const sh = Math.max(1, Math.round(annotation.height * source.naturalHeight));
-        const max = 512;
+        const max = state.exportPreferences.highestQualityMedia ? Number.POSITIVE_INFINITY : 512;
         const ratio = Math.min(1, max / Math.max(sw, sh));
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round(sw * ratio));
@@ -1461,6 +1475,7 @@
   function renderExportPreferences() {
     els.copyPromptOnExportInput.checked = state.exportPreferences.copyPrompt;
     els.openFolderOnExportInput.checked = state.exportPreferences.openFolder;
+    els.highestQualityMediaInput.checked = state.exportPreferences.highestQualityMedia;
   }
 
   async function loadExportPreferences() {
@@ -1471,6 +1486,7 @@
       state.exportPreferences = {
         copyPrompt: result.preferences?.copyPromptOnExport !== false,
         openFolder: result.preferences?.openFolderOnExport !== false,
+        highestQualityMedia: result.preferences?.highestQualityMedia === true,
       };
       state.workspacePreferences = {
         lastActiveProjectId: result.preferences?.lastActiveProjectId || null,
@@ -1487,6 +1503,7 @@
     state.exportPreferences = {
       copyPrompt: els.copyPromptOnExportInput.checked,
       openFolder: els.openFolderOnExportInput.checked,
+      highestQualityMedia: els.highestQualityMediaInput.checked,
     };
     try {
       const response = await fetch("/api/preferences", {
@@ -1495,6 +1512,7 @@
         body: JSON.stringify({
           copyPromptOnExport: state.exportPreferences.copyPrompt,
           openFolderOnExport: state.exportPreferences.openFolder,
+          highestQualityMedia: state.exportPreferences.highestQualityMedia,
         }),
       });
       const result = await response.json().catch(() => ({}));
@@ -1593,6 +1611,7 @@
     els.currentProjectName.textContent = project?.name || "No project loaded";
     els.saveProjectButton.disabled = !project;
     renderProjectList();
+    renderVideoJobs();
     renderProjectTabs();
   }
 
@@ -1900,6 +1919,7 @@
       state.closedProjectIds.delete(project.id);
       setCurrentProject(project);
       applySnapshot(project.snapshot || {}, { save: false, preserveProviderSettings: true });
+      await restoreVideoJobs(project.id);
       updateHistoryButtons();
       els.saveText.textContent = `Saved to ${project.name}`;
       setStatus(`${project.name} loaded`);
@@ -2935,6 +2955,109 @@
     }
   });
 
+  function videoJobTitle(job) {
+    try { return new URL(job.url).hostname.replace(/^www\./, ""); } catch { return "Public video"; }
+  }
+
+  function videoJobStateLabel(job) {
+    if (job.state === "resolving") return "Resolving public video page";
+    if (job.state === "downloading") return `Downloading${Number.isFinite(job.progress) ? ` · ${job.progress}%` : ""}`;
+    if (job.state === "processing") return "Processing downloaded media";
+    if (job.state === "ready") return job.added ? "Added to canvas" : "Ready to add to canvas";
+    if (job.state === "cancelled") return "Download cancelled";
+    return job.error || "Video download failed";
+  }
+
+  function addCompletedVideo(job) {
+    if (!job.result || job.added || state.currentProject?.id !== job.projectId) return;
+    if (state.assets.some((asset) => asset.sourceFile && asset.sourceFile === job.result.sourceFile)) {
+      job.added = true;
+      return;
+    }
+    addVideo(job.result.src, job.result.name, {
+      mimeType: job.result.mimeType, sourceFile: job.result.sourceFile, sourceUrl: job.result.sourceUrl,
+      sourceTitle: job.result.title, sourceExtractor: job.result.extractor, retrievedAt: job.result.retrievedAt,
+    });
+    job.added = true;
+  }
+
+  function renderVideoJobs() {
+    const jobs = [...state.videoJobs.values()].filter((job) => job.projectId === state.currentProject?.id);
+    els.videoJobsBlock.hidden = jobs.length === 0;
+    els.videoJobCount.textContent = String(jobs.length);
+    els.videoJobList.replaceChildren();
+    jobs.sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || ""))).forEach((job) => {
+      const card = document.createElement("article");
+      card.className = `video-job-card ${job.state}`;
+      const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
+      const resolution = job.result ? formatVideoResolution(job.result.width, job.result.height) : "";
+      const meta = [videoJobStateLabel(job), resolution].filter(Boolean).join(" · ");
+      card.innerHTML = `<strong class="video-job-title">${escapeHtml(job.result?.title || videoJobTitle(job))}</strong><span class="video-job-meta">${escapeHtml(meta)}</span>${["resolving", "downloading", "processing"].includes(job.state) ? `<div class="video-job-progress"><span style="width: ${progress}%"></span></div>` : ""}<div class="video-job-actions"></div>`;
+      const actions = card.querySelector(".video-job-actions");
+      if (["resolving", "downloading", "processing"].includes(job.state)) {
+        const cancel = document.createElement("button");
+        cancel.className = "text-button danger"; cancel.type = "button"; cancel.textContent = "Cancel";
+        cancel.addEventListener("click", () => cancelVideoJob(job)); actions.append(cancel);
+      } else if (job.state === "ready" && !job.added) {
+        const add = document.createElement("button");
+        add.className = "text-button"; add.type = "button"; add.textContent = "Add to canvas";
+        add.addEventListener("click", () => { addCompletedVideo(job); renderVideoJobs(); }); actions.append(add);
+      } else if (["failed", "cancelled"].includes(job.state)) {
+        const retry = document.createElement("button");
+        retry.className = "text-button"; retry.type = "button"; retry.textContent = "Retry";
+        retry.addEventListener("click", () => retryVideoJob(job)); actions.append(retry);
+      }
+      if (!actions.childElementCount) actions.remove();
+      els.videoJobList.append(card);
+    });
+  }
+
+  async function pollVideoJob(job) {
+    while (true) {
+      await new Promise((resolve) => window.setTimeout(resolve, 750));
+      const response = await fetch(`/api/projects/${encodeURIComponent(job.projectId)}/video-jobs/${encodeURIComponent(job.id)}`, { cache: "no-store" });
+      const latest = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(latest.error || "Video download status could not be read");
+      Object.assign(job, latest);
+      renderVideoJobs();
+      if (job.state === "ready") { addCompletedVideo(job); renderVideoJobs(); setStatus(`Video downloaded · ${formatVideoResolution(job.result.width, job.result.height)}`); return; }
+      if (["failed", "cancelled"].includes(job.state)) { setStatus(videoJobStateLabel(job)); return; }
+    }
+  }
+
+  async function restoreVideoJobs(projectId) {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/video-jobs`, { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) return;
+    (result.jobs || []).forEach((job) => {
+      state.videoJobs.set(job.id, job);
+      if (job.state === "ready") addCompletedVideo(job);
+      if (["queued", "resolving", "downloading", "processing"].includes(job.state)) {
+        pollVideoJob(job).catch((error) => { job.state = "failed"; job.error = error.message || "Video download status could not be read"; renderVideoJobs(); });
+      }
+    });
+    renderVideoJobs();
+  }
+
+  async function cancelVideoJob(job) {
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(job.projectId)}/video-jobs/${encodeURIComponent(job.id)}`, { method: "DELETE" });
+      const latest = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(latest.error || "Video download could not be cancelled");
+      Object.assign(job, latest); renderVideoJobs(); setStatus("Video download cancelled");
+    } catch (error) { setStatus(error.message || "Video download could not be cancelled"); }
+  }
+
+  async function retryVideoJob(job) {
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(job.projectId)}/video-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
+      const retry = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(retry.error || "Video download could not be retried");
+      state.videoJobs.set(retry.id, retry); renderVideoJobs();
+      pollVideoJob(retry).catch((error) => { retry.state = "failed"; retry.error = error.message || "Video download status could not be read"; renderVideoJobs(); });
+    } catch (error) { setStatus(error.message || "Video download could not be retried"); }
+  }
+
   async function importVideoUrl(url) {
     if (!state.currentProject) {
       setStatus("Open or create a project before importing a video link");
@@ -2960,7 +3083,9 @@
   }
 
   async function importVideoPage(projectId, url) {
+    return startVideoPageJob(projectId, url);
     setStatus("Resolving public video page…");
+    /* Legacy blocking poll retained below temporarily for source history.
     const created = await fetch(`/api/projects/${projectId}/video-jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
     const job = await created.json().catch(() => ({}));
     if (!created.ok) throw new Error(job.error || "Video job could not be created");
@@ -2973,6 +3098,26 @@
       if (status.state === "failed" || status.state === "cancelled") throw new Error(status.error || `Video job ${status.state}`);
       setStatus(status.state === "resolving" ? "Resolving public video page…" : "Downloading public video…");
     }
+    */
+  }
+
+  async function startVideoPageJob(projectId, url) {
+    setStatus("Resolving public video page");
+    const created = await fetch(`/api/projects/${projectId}/video-jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, highestQuality: state.exportPreferences.highestQualityMedia }),
+    });
+    const job = await created.json().catch(() => ({}));
+    if (!created.ok) throw new Error(job.error || "Video job could not be created");
+    state.videoJobs.set(job.id, job);
+    renderVideoJobs();
+    pollVideoJob(job).catch((error) => {
+      job.state = "failed";
+      job.error = error.message || "Video download status could not be read";
+      renderVideoJobs();
+      setStatus(job.error);
+    });
   }
 
   els.workspace.addEventListener("dragover", (event) => {
@@ -3157,6 +3302,7 @@
   els.removeProviderButton.addEventListener("click", removeProviderCredential);
   els.copyPromptOnExportInput.addEventListener("change", saveExportPreferences);
   els.openFolderOnExportInput.addEventListener("change", saveExportPreferences);
+  els.highestQualityMediaInput.addEventListener("change", saveExportPreferences);
   els.createProjectButton.addEventListener("click", createProject);
   els.topCreateProjectButton.addEventListener("click", () => createProject({ quick: true }));
   els.openProjectsButton.addEventListener("click", async () => {

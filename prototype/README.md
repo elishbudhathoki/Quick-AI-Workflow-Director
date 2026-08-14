@@ -12,6 +12,8 @@ py -3 prototype\server.py
 
 Then open `http://127.0.0.1:4173`.
 
+For Windows convenience, use `Restart-AI-CanvasServer.cmd` from the workspace root to stop the server listening on port 4173 and start a fresh mock-AI session. Use `Stop-AI-CanvasServer.cmd` to close it without restarting.
+
 On startup, the app scans the managed projects root and automatically loads the most recently updated project. If no managed project exists, it creates and loads an `Untitled project` folder. Browser-local recovery is used only when the project service is unavailable or when seeding that first managed project. Pasted and imported images autosave into the active project's `media/` directory.
 
 Do not use `python -m http.server` for this app. That command serves the interface but does not provide the `/api` routes needed for provider setup, projects, or AI drafting. If provider setup reports that the local server is unavailable, stop the static server, run `prototype/server.py`, and refresh the page.
@@ -44,14 +46,18 @@ For image-aware drafting, expand **AI settings**, choose OpenAI or Google Gemini
 
 The prototype keeps a fast browser-local autosave while you work and provides explicit project-folder saves for durable organization. It creates crop previews from source-coordinate annotations and materializes pasted/imported media inside the active project's folder. Image-aware drafting supports OpenAI and Gemini through a same-origin local server, provider-specific models, strict structured output, and exact crop-filename validation. Drafted prompts remain editable and are marked stale rather than deleted when their inputs change. Resizing a canvas image does not resample or alter its source crop.
 
-The in-progress video phase supports local video import, direct public video-file URLs, whole-video instructions, sampled contact-sheet drafting, frame extraction, same-origin range playback, persistence, and compact video export names such as `V01.mp4`. Arbitrary public video-page URLs are not supported yet; the next step is the yt-dlp adapter documented in `MIGRATION_HANDOFF.md`.
+The in-progress video phase supports local video import, direct public video-file URLs, public video-page URLs through the local `yt-dlp` adapter, whole-video instructions, sampled contact-sheet drafting, frame extraction, same-origin range playback, persistence, and compact video export names such as `V01.mp4`. Public page downloads run in the background; the Prompt panel shows resolving, downloading, processing, ready, failed, and cancelled states with cancel and retry controls. The downloader never supplies browser cookies or bypasses authentication, DRM, paywalls, or source restrictions.
+
+Video job records are saved in each project folder. If the server restarts while a download is active, AI Canvas restores the job, tells `yt-dlp` to continue from its existing partial file where the source supports it, and restores the job card when that project is reopened.
+
+In **Settings → Export settings**, enable **Highest available quality** to keep image crops at their source resolution, capture video frames as full-resolution lossless PNG files, and ask `yt-dlp` for the best available public video and audio streams. It can use substantially more memory, disk space, and time; public-page downloads still keep the 240 MB local safety limit.
 
 ## Deliberate limitations
 
 - Live OpenAI and Gemini requests require the user's own provider keys and were not executed during automated testing.
 - No production canvas framework or desktop wrapper.
 - No groups, notes, or context-set inclusion controls yet.
-- General video-page downloading through yt-dlp, background progress/cancel/retry, and FFmpeg processing are not integrated yet.
+- Some public sources require FFmpeg to merge their audio and video streams. AI Canvas reports that prerequisite rather than installing a binary automatically.
 - The Phase 1 prototype intentionally uses a readable local settings file for keys rather than an OS credential vault.
 
 The current slice validates the complete fast annotation/editing loop, recoverable deletion, command history, coordinate correctness, crop regeneration, editable provider drafting, timestamped export, local project restoration, and the initial video persistence/export foundation.

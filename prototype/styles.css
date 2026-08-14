@@ -1306,6 +1306,51 @@ kbd {
   gap: 7px;
 }
 
+.video-jobs-block .section-heading {
+  margin-top: 18px;
+}
+
+.video-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.video-job-card {
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.video-job-card.failed { border-color: #f0bfc2; background: #fff8f8; }
+.video-job-card.ready { border-color: #bce6ca; background: #f5fcf7; }
+
+.video-job-title,
+.video-job-meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-job-title { font-size: 11px; }
+.video-job-meta { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.video-job-card.failed .video-job-meta { color: #b3261e; white-space: normal; }
+
+.video-job-progress {
+  height: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #e9ebef;
+}
+
+.video-job-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--blue); transition: width 180ms ease; }
+.video-job-card.processing .video-job-progress > span { background: #8a5b00; }
+
+.video-job-actions { display: flex; gap: 5px; margin-top: 7px; }
+
 .reference-card {
   display: grid;
   grid-template-columns: 54px minmax(0, 1fr);

@@ -127,6 +127,7 @@ class JsonCredentialStore:
         return {
             "copyPromptOnExport": bool(preferences.get("copyPromptOnExport", True)),
             "openFolderOnExport": bool(preferences.get("openFolderOnExport", True)),
+            "highestQualityMedia": bool(preferences.get("highestQualityMedia", False)),
             "lastActiveProjectId": str(preferences.get("lastActiveProjectId") or "") or None,
             "openProjectIds": [str(value) for value in preferences.get("openProjectIds", []) if isinstance(value, str)],
         }
@@ -134,7 +135,7 @@ class JsonCredentialStore:
     def set_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]:
         data = self.read()
         current = data.setdefault("preferences", {})
-        for key in ("copyPromptOnExport", "openFolderOnExport"):
+        for key in ("copyPromptOnExport", "openFolderOnExport", "highestQualityMedia"):
             if key in preferences:
                 current[key] = bool(preferences[key])
         if "lastActiveProjectId" in preferences:
@@ -851,16 +852,47 @@ class VideoJobManager:
         self.projects = projects
         self.jobs: dict[str, dict[str, Any]] = {}
         self.lock = threading.RLock()
+        self.restore_unfinished()
 
-    def create(self, project_id: str, url: str) -> dict[str, Any]:
+    def persist_project(self, project_id: str) -> None:
+        folder = self.projects.folder(project_id)
+        records = [job for job in self.jobs.values() if job["projectId"] == project_id]
+        temporary = folder / "video-jobs.json.tmp"
+        temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(folder / "video-jobs.json")
+
+    def restore_unfinished(self) -> None:
+        for path in self.projects.root.glob("*/video-jobs.json"):
+            try:
+                records = json.loads(path.read_text(encoding="utf-8"))
+                for job in records if isinstance(records, list) else []:
+                    if not isinstance(job, dict) or not job.get("id") or not job.get("projectId"):
+                        continue
+                    if job.get("state") in {"resolving", "downloading", "processing", "queued"}:
+                        job.update(state="queued", error="Resuming after server restart.", updatedAt=utc_now())
+                    self.jobs[str(job["id"])] = job
+            except (OSError, json.JSONDecodeError):
+                continue
+        for job in list(self.jobs.values()):
+            if job.get("state") == "queued":
+                self.persist_project(str(job["projectId"]))
+                threading.Thread(target=self.run, args=(str(job["id"]),), daemon=True).start()
+
+    def create(self, project_id: str, url: str, highest_quality: bool = False) -> dict[str, Any]:
         self.projects.folder(project_id)
         self.projects.validate_public_url(url)
-        job = {"id": f"video-job-{secrets.token_hex(6)}", "projectId": project_id, "url": url,
+        job = {"id": f"video-job-{secrets.token_hex(6)}", "projectId": project_id, "url": url, "highestQuality": highest_quality,
                "state": "resolving", "progress": 0, "createdAt": utc_now(), "updatedAt": utc_now(), "error": None}
         with self.lock:
             self.jobs[job["id"]] = job
+            self.persist_project(project_id)
         threading.Thread(target=self.run, args=(job["id"],), daemon=True).start()
         return dict(job)
+
+    def list(self, project_id: str) -> list[dict[str, Any]]:
+        self.projects.folder(project_id)
+        with self.lock:
+            return [dict(job) for job in self.jobs.values() if job["projectId"] == project_id]
 
     def get(self, project_id: str, job_id: str) -> dict[str, Any]:
         with self.lock:
@@ -875,7 +907,18 @@ class VideoJobManager:
             if job["state"] in {"ready", "failed", "cancelled"}:
                 return job
             self.jobs[job_id].update(state="cancelled", updatedAt=utc_now())
+            self.persist_project(project_id)
             return dict(self.jobs[job_id])
+
+    def retry(self, project_id: str, job_id: str) -> dict[str, Any]:
+        with self.lock:
+            previous = self.jobs.get(job_id)
+            if not previous or previous["projectId"] != project_id:
+                raise FileNotFoundError("Video job not found.")
+            if previous["state"] not in {"failed", "cancelled"}:
+                raise ValueError("Only failed or cancelled video downloads can be retried.")
+            url = str(previous["url"])
+        return self.create(project_id, url, bool(previous.get("highestQuality")))
 
     def run(self, job_id: str) -> None:
         try:
@@ -884,29 +927,47 @@ class VideoJobManager:
                 job = self.jobs[job_id]
                 url, project_id = job["url"], job["projectId"]
                 job.update(state="downloading", progress=1, updatedAt=utc_now())
+                self.persist_project(project_id)
             folder = self.projects.folder(project_id)
             temporary = folder / "media" / ".downloads"
             temporary.mkdir(exist_ok=True)
             # Let each extractor choose its best public format. Filtering on a
             # reported filesize rejects Pinterest streams that omit that field;
             # the post-download size check below remains the hard safety limit.
+            def update_progress(data: dict[str, Any]) -> None:
+                if data.get("status") != "downloading":
+                    return
+                with self.lock:
+                    active = self.jobs.get(job_id)
+                    if not active or active["state"] == "cancelled":
+                        raise yt_dlp.utils.DownloadError("Download cancelled by user.")
+                    total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+                    downloaded = data.get("downloaded_bytes") or 0
+                    progress = min(99, max(1, round(downloaded * 100 / total))) if total else active.get("progress", 1)
+                    active.update(state="downloading", progress=progress, speed=data.get("speed"), updatedAt=utc_now())
+
             options = {"outtmpl": str(temporary / "%(id)s.%(ext)s"), "noplaylist": True,
-                       "max_filesize": MAX_VIDEO_BYTES, "quiet": True, "no_warnings": True}
+                       "max_filesize": MAX_VIDEO_BYTES, "quiet": True, "no_warnings": True,
+                       "progress_hooks": [update_progress]}
+            if job.get("highestQuality"):
+                options["format"] = "bestvideo*+bestaudio/best"
             node = shutil.which("node")
             if node:
                 # YouTube increasingly requires its player JavaScript to be
                 # interpreted. Enable the user's installed Node runtime rather
                 # than attempting to imitate a logged-in browser session.
                 options["js_runtimes"] = {"node": {"path": node}}
-            # YouTube's default anonymous web client can report public Shorts
-            # as unavailable. The official Android client exposes the same
-            # public, non-DRM stream without cookies or authenticated access.
-            if "youtube.com" in urllib.parse.urlparse(url).hostname.lower() or "youtu.be" in urllib.parse.urlparse(url).hostname.lower():
-                options["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+            # Do not force YouTube's Android client: it can expose only a
+            # 360p Shorts rendition. yt-dlp's default public client set can
+            # choose among all anonymously available formats; high-quality
+            # jobs explicitly select best video plus best audio above.
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(url, download=True)
             with self.lock:
-                if self.jobs[job_id]["state"] == "cancelled": return
+                if self.jobs[job_id]["state"] == "cancelled":
+                    return
+                self.jobs[job_id].update(state="processing", progress=99, updatedAt=utc_now())
+                self.persist_project(project_id)
             filename = Path(downloader.prepare_filename(info))
             if not filename.exists(): raise RuntimeError("Downloader did not produce a local video file.")
             if filename.stat().st_size > MAX_VIDEO_BYTES: raise RuntimeError("Video exceeded the 240 MB local import limit.")
@@ -917,9 +978,15 @@ class VideoJobManager:
                       "mimeType": mimetypes.guess_type(target.name)[0] or "video/mp4", "sourceFile": f"media/{target_name}",
                       "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(target_name)}", "size": target.stat().st_size,
                       "title": info.get("title"), "duration": info.get("duration"), "extractor": info.get("extractor"),
+                      "width": info.get("width"), "height": info.get("height"),
                       "sourceUrl": url, "retrievedAt": utc_now()}
-            with self.lock: self.jobs[job_id].update(state="ready", progress=100, result=result, updatedAt=utc_now())
+            with self.lock:
+                self.jobs[job_id].update(state="ready", progress=100, result=result, updatedAt=utc_now())
+                self.persist_project(project_id)
         except Exception as error:
+            with self.lock:
+                if self.jobs.get(job_id, {}).get("state") == "cancelled":
+                    return
             message = str(error)
             if "ffmpeg is not installed" in message.lower():
                 message = "FFmpeg is required to merge this source's audio and video streams. Install FFmpeg, restart AI Canvas, and retry."
@@ -927,7 +994,9 @@ class VideoJobManager:
                 message = "This source is DRM-protected and cannot be downloaded."
             elif "not available" in message.lower():
                 message = "This video is not publicly available to the downloader. Try another public source."
-            with self.lock: self.jobs[job_id].update(state="failed", error=message, updatedAt=utc_now())
+            with self.lock:
+                self.jobs[job_id].update(state="failed", error=message, updatedAt=utc_now())
+                self.persist_project(str(self.jobs[job_id]["projectId"]))
 
 
 class CanvasRequestHandler(SimpleHTTPRequestHandler):
@@ -1065,6 +1134,7 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             preferences = self.credential_store.get_preferences() if isinstance(self.credential_store, JsonCredentialStore) else {
                 "copyPromptOnExport": True,
                 "openFolderOnExport": True,
+                "highestQualityMedia": False,
             }
             self.send_json(HTTPStatus.OK, {"preferences": preferences})
             return
@@ -1074,6 +1144,11 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         media_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/media/([^/]+)", path)
         if media_match:
             self.send_project_media(media_match.group(1), media_match.group(2))
+            return
+        jobs_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs", path)
+        if jobs_match:
+            try: self.send_json(HTTPStatus.OK, {"jobs": self.video_jobs.list(jobs_match.group(1))})
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
             return
         job_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs/(video-job-[a-f0-9]+)", path)
         if job_match:
@@ -1122,6 +1197,7 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                 preferences = {
                     "copyPromptOnExport": bool(body.get("copyPromptOnExport", True)),
                     "openFolderOnExport": bool(body.get("openFolderOnExport", True)),
+                    "highestQualityMedia": bool(body.get("highestQualityMedia", False)),
                 }
             self.send_json(HTTPStatus.OK, {"preferences": preferences})
             return
@@ -1139,7 +1215,14 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs", path)
         if match:
-            try: result = self.video_jobs.create(match.group(1), str(body.get("url") or "").strip())
+            try: result = self.video_jobs.create(match.group(1), str(body.get("url") or "").strip(), bool(body.get("highestQuality", False)))
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)}); return
+            except ValueError as error: self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)}); return
+            self.send_json(HTTPStatus.CREATED, result)
+            return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs/(video-job-[a-f0-9]+)/retry", path)
+        if match:
+            try: result = self.video_jobs.retry(*match.groups())
             except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)}); return
             except ValueError as error: self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)}); return
             self.send_json(HTTPStatus.CREATED, result)

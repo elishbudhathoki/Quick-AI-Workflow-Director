@@ -107,6 +107,14 @@
             <p class="muted">Annotations will appear here.</p>
           </div>
 
+          <section id="videoJobsBlock" class="video-jobs-block" hidden aria-live="polite">
+            <div class="section-heading">
+              <span>Video downloads</span>
+              <small id="videoJobCount">0</small>
+            </div>
+            <div id="videoJobList" class="video-job-list"></div>
+          </section>
+
           <div id="promptOutputBlock" class="prompt-output-block" hidden>
             <div class="section-heading">
               <span>Drafted prompt</span>
@@ -179,6 +187,13 @@
               <small>Shared across projects</small>
             </summary>
             <div class="export-settings-body">
+              <label class="setting-toggle">
+                <input id="highestQualityMediaInput" type="checkbox" />
+                <span>
+                  <strong>Highest available quality</strong>
+                  <small>Keep source-resolution crops and video frames; use lossless PNG frames and request the best available public video streams. Larger files and slower exports are expected.</small>
+                </span>
+              </label>
               <label class="setting-toggle">
                 <input id="copyPromptOnExportInput" type="checkbox" checked />
                 <span>
