@@ -1,0 +1,6 @@
+prototype/__pycache__/
+prototype/server-test*.log
+docx_render/
+migration-bundles/
+.venv/
+*.pyc

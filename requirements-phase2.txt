@@ -1,0 +1,4 @@
+# Staged dependency for the next Phase 2 task.
+# It is not imported by the current server yet.
+yt-dlp
+

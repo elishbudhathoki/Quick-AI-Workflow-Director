@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Canvas Interaction Spike</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">AC</span>
+          <div class="brand-copy">
+            <strong>AI Canvas</strong>
+            <small>Local workspace</small>
+          </div>
+        </div>
+
+        <nav class="project-tabs-shell" aria-label="Open projects">
+          <button id="topCreateProjectButton" class="project-tab-action primary" type="button" title="New project" aria-label="Create project">+</button>
+          <div id="projectTabs" class="project-tabs"></div>
+          <button id="openProjectsButton" class="project-tab-action" type="button" title="Browse project folders" aria-label="Open project folders">▤</button>
+        </nav>
+
+        <div class="topbar-actions">
+          <button id="fitButton" class="button ghost" title="Fit everything in view (0)">Fit</button>
+          <button id="settingsButton" class="icon-button settings-icon-button" title="API and model settings" aria-label="Open settings">⚙</button>
+          <button id="exportButton" class="button ghost" title="Write prompt, manifest, and crops to a folder">Export package</button>
+          <button id="previewButton" class="button primary" title="Analyze reference crops and draft a detailed prompt">Analyze &amp; Draft</button>
+        </div>
+      </header>
+
+      <aside class="toolbar" aria-label="Canvas tools">
+        <button class="tool active" data-tool="select" title="Select (V)">
+          <span class="tool-icon">↖</span>
+          <span>V</span>
+        </button>
+        <button class="tool" data-tool="region" title="Region (R)">
+          <span class="tool-icon">▱</span>
+          <span>R</span>
+        </button>
+        <button class="tool" data-tool="hand" title="Pan (H or hold Space)">
+          <span class="tool-icon">✋</span>
+          <span>H</span>
+        </button>
+        <div class="toolbar-divider"></div>
+        <button id="undoButton" class="tool" title="Undo (Ctrl+Z)" disabled>
+          <span class="tool-icon">↶</span>
+          <span>Undo</span>
+        </button>
+        <button id="redoButton" class="tool" title="Redo (Ctrl+Y)" disabled>
+          <span class="tool-icon">↷</span>
+          <span>Redo</span>
+        </button>
+        <button id="clearButton" class="tool" title="Clear canvas">
+          <span class="tool-icon">⌫</span>
+          <span>Clear</span>
+        </button>
+        <div class="toolbar-spacer"></div>
+        <input id="fileInput" type="file" accept="image/*,video/*" multiple hidden />
+      </aside>
+
+      <section id="workspace" class="workspace" aria-label="Infinite canvas">
+        <div id="scene" class="scene"></div>
+
+        <section id="emptyState" class="empty-state">
+          <div class="empty-icon">⌘V</div>
+          <h1>Paste a reference</h1>
+          <p>Paste an image or video. Press <kbd>R</kbd> to annotate a region or an entire video.</p>
+          <button id="emptyImportButton" class="button secondary">Choose media</button>
+        </section>
+
+        <div id="modeHint" class="mode-hint" hidden>
+          <strong>Region mode</strong>
+          <span>Draw on an image · Esc to finish</span>
+        </div>
+      </section>
+
+      <aside id="panel" class="panel">
+        <div class="panel-tabs">
+          <button class="panel-tab active" data-tab="prompt">Prompt</button>
+          <button class="panel-tab" data-tab="selection">Selection</button>
+          <button class="panel-tab" data-tab="projects">Projects</button>
+          <button class="panel-tab" data-tab="settings">Settings</button>
+          <button id="collapsePanelButton" class="icon-button" title="Collapse panel">›</button>
+        </div>
+
+        <div id="promptTab" class="panel-content">
+          <p class="prototype-notice">References stay local until you press <strong>Analyze &amp; Draft</strong>. Image crops are sent directly; videos are represented by a small contact sheet sampled across the full clip. The model receives each compact filename and raw instruction.</p>
+
+          <label class="field">
+            <span>What are you creating?</span>
+            <textarea id="objectiveInput" rows="4" placeholder="Create a cinematic fashion portrait…"></textarea>
+          </label>
+
+          <label class="field">
+            <span>Prompt drafting instructions</span>
+            <textarea id="formatInput" rows="4" placeholder="Use separate Character, Wardrobe, Environment, and Lighting sections."></textarea>
+          </label>
+
+          <div class="section-heading">
+            <span>References</span>
+            <small id="cropCount">0</small>
+          </div>
+          <div id="referenceList" class="reference-list">
+            <p class="muted">Annotations will appear here.</p>
+          </div>
+
+          <div id="promptOutputBlock" class="prompt-output-block" hidden>
+            <div class="section-heading">
+              <span>Drafted prompt</span>
+              <div class="prompt-heading-actions">
+                <button id="restorePromptButton" class="text-button" type="button">Restore</button>
+                <button id="regeneratePromptButton" class="text-button" type="button">Regenerate</button>
+                <button id="copyPromptButton" class="text-button" type="button">Copy</button>
+              </div>
+            </div>
+            <p id="promptStatus" class="prompt-status" role="status" aria-live="polite"></p>
+            <textarea id="promptOutput" rows="16" aria-label="Editable drafted prompt" spellcheck="true"></textarea>
+            <div id="promptErrorActions" class="prompt-error-actions" hidden>
+              <button id="retryDraftButton" class="button secondary" type="button">Retry drafting</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="settingsTab" class="panel-content" hidden>
+          <div class="settings-heading">
+            <strong>AI providers</strong>
+            <small>Connected providers work across every project.</small>
+          </div>
+          <details id="aiSettings" class="ai-settings" open>
+            <summary>
+              <span>AI settings</span>
+              <small id="providerStatus">Checking local server…</small>
+            </summary>
+            <div class="ai-settings-body">
+              <label>
+                <span>Provider</span>
+                <select id="providerInput">
+                  <option value="openai">OpenAI</option>
+                  <option value="gemini">Google Gemini</option>
+                </select>
+              </label>
+              <label>
+                <span>Vision model</span>
+                <select id="modelInput"></select>
+              </label>
+              <label>
+                <span>Image detail</span>
+                <select id="imageDetailInput">
+                  <option value="auto">Auto</option>
+                  <option value="high">High</option>
+                  <option value="original">Original crop detail</option>
+                  <option value="low">Low · faster</option>
+                </select>
+              </label>
+              <label>
+                <span>API key <small>(saved in local settings)</small></span>
+                <input id="apiKeyInput" type="password" placeholder="Paste provider API key" autocomplete="off" spellcheck="false" />
+              </label>
+              <div id="providerConnection" class="provider-connection neutral" role="status" aria-live="polite">
+                <span class="provider-connection-dot" aria-hidden="true"></span>
+                <span>
+                  <strong id="providerConnectionTitle">Checking connection</strong>
+                  <small id="keyHint">Looking for the local AI Canvas server…</small>
+                </span>
+              </div>
+              <div class="provider-actions">
+                <button id="saveProviderButton" class="button secondary" type="button">Save &amp; connect</button>
+                <button id="removeProviderButton" class="button ghost" type="button" hidden>Remove key</button>
+              </div>
+              <button id="mockDraftButton" class="button secondary" type="button">Draft without AI</button>
+            </div>
+          </details>
+          <details class="ai-settings export-settings" open>
+            <summary>
+              <span>Export settings</span>
+              <small>Shared across projects</small>
+            </summary>
+            <div class="export-settings-body">
+              <label class="setting-toggle">
+                <input id="copyPromptOnExportInput" type="checkbox" checked />
+                <span>
+                  <strong>Copy prompt after export</strong>
+                  <small>Put the generated prompt on the clipboard.</small>
+                </span>
+              </label>
+              <label class="setting-toggle">
+                <input id="openFolderOnExportInput" type="checkbox" checked />
+                <span>
+                  <strong>Open package folder after export</strong>
+                  <small>Reveal the timestamped package in File Explorer.</small>
+                </span>
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <div id="selectionTab" class="panel-content" hidden>
+          <div id="selectionEmpty" class="selection-empty">
+            <p>Select an image or annotation to inspect it.</p>
+          </div>
+          <div id="selectionDetails" hidden></div>
+        </div>
+
+        <div id="projectsTab" class="panel-content" hidden>
+          <div class="projects-hero">
+            <span>Project folders</span>
+            <strong id="currentProjectName">No project loaded</strong>
+            <small id="projectsFolderPath">Start the local server to manage project folders.</small>
+          </div>
+          <div class="project-create-row">
+            <input id="newProjectNameInput" type="text" placeholder="Project name" maxlength="100" />
+            <button id="createProjectButton" class="button primary" type="button">Create</button>
+          </div>
+          <button id="saveProjectButton" class="button secondary project-save-button" type="button" disabled>Save current project</button>
+          <div class="section-heading">
+            <span>Saved projects</span>
+            <button id="refreshProjectsButton" class="text-button" type="button">Scan folders</button>
+          </div>
+          <div id="projectList" class="project-list">
+            <p class="muted">No projects loaded.</p>
+          </div>
+        </div>
+      </aside>
+
+      <button id="expandPanelButton" class="expand-panel" title="Open panel" hidden>‹</button>
+
+      <footer class="statusbar">
+        <span id="statusText">Ready</span>
+        <span id="saveText">Not saved yet</span>
+        <span id="zoomText">100%</span>
+        <span class="status-shortcuts"><kbd>Space</kbd> pan · wheel zoom · <kbd>R</kbd> region</span>
+      </footer>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dce7ef"/>
+      <stop offset="1" stop-color="#8ba0af"/>
+    </linearGradient>
+    <linearGradient id="jacket" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b2e33"/>
+      <stop offset="0.55" stop-color="#111318"/>
+      <stop offset="1" stop-color="#363b42"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="800" fill="url(#bg)"/>
+  <circle cx="600" cy="190" r="95" fill="#c99577"/>
+  <path d="M490 170 Q600 65 710 170 L692 98 Q600 34 508 98Z" fill="#302722"/>
+  <path d="M420 305 Q600 240 780 305 L890 650 Q600 750 310 650Z" fill="url(#jacket)"/>
+  <path d="M515 285 L600 420 L685 285 L735 305 L640 505 L560 505 L465 305Z" fill="#454b54"/>
+  <path d="M600 420 L600 690" stroke="#7e858f" stroke-width="7"/>
+  <path d="M365 365 L230 640 L320 680 L465 420Z" fill="#171a1f"/>
+  <path d="M835 365 L970 640 L880 680 L735 420Z" fill="#171a1f"/>
+  <rect x="700" y="520" width="90" height="46" rx="8" fill="#f5f0e8"/>
+  <text x="745" y="550" text-anchor="middle" font-family="Arial" font-size="21" font-weight="700" fill="#d22c43">LOGO</text>
+  <rect x="0" y="700" width="1200" height="100" fill="#5b6a74" opacity="0.4"/>
+</svg>
