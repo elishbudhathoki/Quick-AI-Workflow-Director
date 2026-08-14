@@ -19,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -843,6 +844,84 @@ def mock_draft(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class VideoJobManager:
+    """Small local job runner for permitted public video-page downloads."""
+
+    def __init__(self, projects: ProjectRepository) -> None:
+        self.projects = projects
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.lock = threading.RLock()
+
+    def create(self, project_id: str, url: str) -> dict[str, Any]:
+        self.projects.folder(project_id)
+        self.projects.validate_public_url(url)
+        job = {"id": f"video-job-{secrets.token_hex(6)}", "projectId": project_id, "url": url,
+               "state": "resolving", "progress": 0, "createdAt": utc_now(), "updatedAt": utc_now(), "error": None}
+        with self.lock:
+            self.jobs[job["id"]] = job
+        threading.Thread(target=self.run, args=(job["id"],), daemon=True).start()
+        return dict(job)
+
+    def get(self, project_id: str, job_id: str) -> dict[str, Any]:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job or job["projectId"] != project_id:
+                raise FileNotFoundError("Video job not found.")
+            return dict(job)
+
+    def cancel(self, project_id: str, job_id: str) -> dict[str, Any]:
+        with self.lock:
+            job = self.get(project_id, job_id)
+            if job["state"] in {"ready", "failed", "cancelled"}:
+                return job
+            self.jobs[job_id].update(state="cancelled", updatedAt=utc_now())
+            return dict(self.jobs[job_id])
+
+    def run(self, job_id: str) -> None:
+        try:
+            import yt_dlp
+            with self.lock:
+                job = self.jobs[job_id]
+                url, project_id = job["url"], job["projectId"]
+                job.update(state="downloading", progress=1, updatedAt=utc_now())
+            folder = self.projects.folder(project_id)
+            temporary = folder / "media" / ".downloads"
+            temporary.mkdir(exist_ok=True)
+            # Let each extractor choose its best public format. Filtering on a
+            # reported filesize rejects Pinterest streams that omit that field;
+            # the post-download size check below remains the hard safety limit.
+            options = {"outtmpl": str(temporary / "%(id)s.%(ext)s"), "noplaylist": True,
+                       "max_filesize": MAX_VIDEO_BYTES, "quiet": True, "no_warnings": True}
+            node = shutil.which("node")
+            if node:
+                # YouTube increasingly requires its player JavaScript to be
+                # interpreted. Enable the user's installed Node runtime rather
+                # than attempting to imitate a logged-in browser session.
+                options["js_runtimes"] = {"node": {"path": node}}
+            # YouTube's default anonymous web client can report public Shorts
+            # as unavailable. The official Android client exposes the same
+            # public, non-DRM stream without cookies or authenticated access.
+            if "youtube.com" in urllib.parse.urlparse(url).hostname.lower() or "youtu.be" in urllib.parse.urlparse(url).hostname.lower():
+                options["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+            with yt_dlp.YoutubeDL(options) as downloader:
+                info = downloader.extract_info(url, download=True)
+            with self.lock:
+                if self.jobs[job_id]["state"] == "cancelled": return
+            filename = Path(downloader.prepare_filename(info))
+            if not filename.exists(): raise RuntimeError("Downloader did not produce a local video file.")
+            if filename.stat().st_size > MAX_VIDEO_BYTES: raise RuntimeError("Video exceeded the 240 MB local import limit.")
+            target_name = f"video-{secrets.token_hex(8)}{filename.suffix.lower() or '.mp4'}"
+            target = folder / "media" / target_name
+            filename.replace(target)
+            result = {"name": self.projects.clean_name(str(info.get("title") or "Downloaded video")) + target.suffix,
+                      "mimeType": mimetypes.guess_type(target.name)[0] or "video/mp4", "sourceFile": f"media/{target_name}",
+                      "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(target_name)}", "size": target.stat().st_size,
+                      "title": info.get("title"), "duration": info.get("duration"), "extractor": info.get("extractor")}
+            with self.lock: self.jobs[job_id].update(state="ready", progress=100, result=result, updatedAt=utc_now())
+        except Exception as error:
+            with self.lock: self.jobs[job_id].update(state="failed", error=str(error), updatedAt=utc_now())
+
+
 class CanvasRequestHandler(SimpleHTTPRequestHandler):
     server_version = "AICanvasLocal/0.3"
 
@@ -857,6 +936,10 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
     @property
     def projects(self) -> ProjectRepository:
         return getattr(self.server, "project_repository")
+
+    @property
+    def video_jobs(self) -> VideoJobManager:
+        return getattr(self.server, "video_jobs")
 
     def send_json(self, status: int, value: Any) -> None:
         body = json_bytes(value)
@@ -984,6 +1067,11 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         if media_match:
             self.send_project_media(media_match.group(1), media_match.group(2))
             return
+        job_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs/(video-job-[a-f0-9]+)", path)
+        if job_match:
+            try: self.send_json(HTTPStatus.OK, self.video_jobs.get(*job_match.groups()))
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+            return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)", path)
         if match:
             try:
@@ -1039,6 +1127,13 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             except (OSError, ValueError) as error:
                 self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
                 return
+            self.send_json(HTTPStatus.CREATED, result)
+            return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs", path)
+        if match:
+            try: result = self.video_jobs.create(match.group(1), str(body.get("url") or "").strip())
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)}); return
+            except ValueError as error: self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)}); return
             self.send_json(HTTPStatus.CREATED, result)
             return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/export", path)
@@ -1119,6 +1214,11 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        job_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs/(video-job-[a-f0-9]+)", path)
+        if job_match:
+            try: self.send_json(HTTPStatus.OK, self.video_jobs.cancel(*job_match.groups()))
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+            return
         project_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)", path)
         if project_match:
             try:
@@ -1238,6 +1338,7 @@ def main() -> None:
     else:
         server.credential_store = JsonCredentialStore(args.settings_file)  # type: ignore[attr-defined]
     server.project_repository = ProjectRepository(args.projects_dir)  # type: ignore[attr-defined]
+    server.video_jobs = VideoJobManager(server.project_repository)  # type: ignore[attr-defined]
     mode = "mock AI" if args.mock_ai else "provider APIs"
     print(f"AI Canvas running at http://{args.host}:{args.port} ({mode})")
     print(f"Projects folder: {server.project_repository.root}")  # type: ignore[attr-defined]

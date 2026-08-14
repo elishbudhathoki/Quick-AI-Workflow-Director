@@ -2934,7 +2934,10 @@
     }
     setStatus("Downloading video link into the current projectâ€¦");
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(state.currentProject.id)}/videos/import-url`, {
+      const projectId = encodeURIComponent(state.currentProject.id);
+      const directFile = /\.(mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i.test(url);
+      if (!directFile) return await importVideoPage(projectId, url);
+      const response = await fetch(`/api/projects/${projectId}/videos/import-url`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
@@ -2945,6 +2948,22 @@
     } catch (error) {
       console.error(error);
       setStatus(error.message || "Video link import failed");
+    }
+  }
+
+  async function importVideoPage(projectId, url) {
+    setStatus("Resolving public video page…");
+    const created = await fetch(`/api/projects/${projectId}/video-jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    const job = await created.json().catch(() => ({}));
+    if (!created.ok) throw new Error(job.error || "Video job could not be created");
+    while (true) {
+      await new Promise((resolve) => window.setTimeout(resolve, 900));
+      const response = await fetch(`/api/projects/${projectId}/video-jobs/${encodeURIComponent(job.id)}`, { cache: "no-store" });
+      const status = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(status.error || "Video download status could not be read");
+      if (status.state === "ready") { addVideo(status.result.src, status.result.name, { mimeType: status.result.mimeType, sourceFile: status.result.sourceFile }); setStatus(`Video downloaded · ${status.result.name}`); return; }
+      if (status.state === "failed" || status.state === "cancelled") throw new Error(status.error || `Video job ${status.state}`);
+      setStatus(status.state === "resolving" ? "Resolving public video page…" : "Downloading public video…");
     }
   }
 
