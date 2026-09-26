@@ -147,7 +147,9 @@
   }
 
   const DB_NAME = "ai-canvas-prototype";
+  const DB_VERSION = 2;
   const DB_STORE = "projects";
+  const TEMPLATE_STORE = "canvas-templates";
   const DB_KEY = "default-project";
 
   function uid(prefix) {
@@ -408,10 +410,13 @@
   function openProjectDatabase() {
     if (state.database) return Promise.resolve(state.database);
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 1);
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
         if (!request.result.objectStoreNames.contains(DB_STORE)) {
           request.result.createObjectStore(DB_STORE);
+        }
+        if (!request.result.objectStoreNames.contains(TEMPLATE_STORE)) {
+          request.result.createObjectStore(TEMPLATE_STORE, { keyPath: "id" });
         }
       };
       request.onsuccess = () => {
@@ -478,6 +483,81 @@
       els.saveText.textContent = "Local save unavailable";
     }
     return false;
+  }
+
+  async function listCanvasTemplates() {
+    const database = await openProjectDatabase();
+    return new Promise((resolve, reject) => {
+      const request = database.transaction(TEMPLATE_STORE, "readonly").objectStore(TEMPLATE_STORE).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function saveCanvasTemplate(assets, name) {
+    const database = await openProjectDatabase();
+    const template = { id: uid("template"), name: String(name || "Canvas template").slice(0, 80), assets: clone(assets), createdAt: new Date().toISOString() };
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(TEMPLATE_STORE, "readwrite");
+      transaction.objectStore(TEMPLATE_STORE).put(template);
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+    setStatus(`${template.name} saved as a template`);
+  }
+
+  async function deleteCanvasTemplate(templateId) {
+    const database = await openProjectDatabase();
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(TEMPLATE_STORE, "readwrite");
+      transaction.objectStore(TEMPLATE_STORE).delete(templateId);
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+  }
+
+  async function openCanvasTemplatePicker() {
+    const picker = document.querySelector("#canvasTemplatePicker");
+    const list = picker.querySelector('[data-field="template-list"]');
+    picker.hidden = false;
+    list.innerHTML = `<p class="muted">Loading templates…</p>`;
+    try {
+      const templates = await listCanvasTemplates();
+      list.innerHTML = templates.length ? "" : `<p class="muted">No templates yet. Select an image, video, or annotated crop and choose Save as template.</p>`;
+      templates.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).forEach((template) => {
+        const item = document.createElement("article");
+        item.className = "canvas-template-item";
+        const previewAsset = template.assets[0] || {};
+        const preview = previewAsset.type === "video"
+          ? `<video class="canvas-template-preview" muted playsinline preload="metadata" src="${escapeAttribute(previewAsset.scrubProxySrc || previewAsset.src || "")}"></video>`
+          : `<img class="canvas-template-preview" src="${escapeAttribute(previewAsset.src || "")}" alt="${escapeAttribute(template.name)} preview" />`;
+        item.innerHTML = `${preview}<div class="canvas-template-copy"><strong>${escapeHtml(template.name)}</strong><small>${template.assets.length} reference${template.assets.length === 1 ? "" : "s"} · annotations included</small></div><div class="canvas-template-actions"><button class="text-button danger" type="button">Delete</button><button class="button primary" type="button">Use</button></div>`;
+        const previewVideo = item.querySelector("video");
+        if (previewVideo) previewVideo.addEventListener("loadeddata", () => { previewVideo.currentTime = Math.min(.1, previewVideo.duration || 0); }, { once: true });
+        item.querySelector(".text-button").addEventListener("click", async () => {
+          await deleteCanvasTemplate(template.id);
+          openCanvasTemplatePicker();
+        });
+        item.querySelector(".button").addEventListener("click", () => {
+          const before = captureSnapshot();
+          const copies = clone(template.assets).map((asset) => {
+            asset.id = uid("asset");
+            asset.referenceNumber = nextReferenceNumber();
+            asset.annotations = (asset.annotations || []).map((annotation) => ({ ...annotation, id: uid("annotation") }));
+            asset.x += 32; asset.y += 32;
+            return asset;
+          });
+          state.assets.push(...copies);
+          renderAll();
+          pushHistory(before);
+          picker.hidden = true;
+          setStatus(`${template.name} added to canvas`);
+        });
+        list.append(item);
+      });
+    } catch {
+      list.innerHTML = `<p class="muted">Templates could not be loaded.</p>`;
+    }
   }
 
   function setTool(tool) {
@@ -1257,6 +1337,7 @@
             <button class="button primary" data-action="open-frame-picker" type="button">Open frame picker</button>
             <button class="button secondary" data-action="annotate-video" type="button">Edit instruction</button>
           </div>
+          <button class="button secondary" data-action="save-canvas-template" type="button">Save as template</button>
           <div class="selection-field">
             <label>Even frame extraction</label>
             <select data-field="frame-count">
@@ -1340,6 +1421,7 @@
           const count = Number(els.selectionDetails.querySelector('[data-field="frame-count"]').value) || 8;
           extractVideoFrames(asset, count);
         });
+        els.selectionDetails.querySelector('[data-action="save-canvas-template"]').addEventListener("click", () => saveCanvasTemplate([asset], asset.name));
         return;
       }
       els.selectionDetails.innerHTML = `
@@ -1351,6 +1433,7 @@
         <div class="selection-field"><label>Name</label><input data-field="asset-name" value="${escapeAttribute(asset.name)}" /></div>
         ${asset.mediaError ? `<p class="selection-media-error">${escapeHtml(asset.mediaError)}</p>` : ""}
         <p class="muted">${asset.annotations.length} annotation${asset.annotations.length === 1 ? "" : "s"}</p>
+        <button class="button secondary" data-action="save-canvas-template" type="button">Save as template</button>
       `;
       const input = els.selectionDetails.querySelector('[data-field="asset-name"]');
       let beforeEdit = null;
@@ -1360,6 +1443,7 @@
         renderAsset(asset);
       });
       input.addEventListener("change", () => pushHistory(beforeEdit));
+      els.selectionDetails.querySelector('[data-action="save-canvas-template"]').addEventListener("click", () => saveCanvasTemplate([asset], asset.name));
       return;
     }
 
@@ -1376,6 +1460,7 @@
       </div>
       <div class="selection-field"><label>Raw instruction</label><input data-field="raw" value="${escapeAttribute(annotation.rawInstruction)}" /></div>
       <div class="selection-field"><label>Label</label><input data-field="label" value="${escapeAttribute(annotation.label)}" /></div>
+      <button class="button secondary" data-action="save-canvas-template" type="button">Save crop as template</button>
     `;
     const annotationPreview = els.selectionDetails.querySelector('[data-field="annotation-preview"]');
     cropAnnotation(asset, annotation).then((src) => {
@@ -1403,6 +1488,11 @@
         }
         pushHistory(beforeEdit);
       });
+    });
+    els.selectionDetails.querySelector('[data-action="save-canvas-template"]').addEventListener("click", () => {
+      const templateAsset = clone(asset);
+      templateAsset.annotations = [clone(annotation)];
+      saveCanvasTemplate([templateAsset], annotation.label || asset.name);
     });
   }
 
@@ -3436,16 +3526,15 @@
 
   els.workspace.addEventListener("dblclick", (event) => {
     const assetElement = event.target.closest?.(".asset");
-    if (assetElement) {
-      const asset = findAsset(assetElement.dataset.assetId);
+    if (event.ctrlKey || event.metaKey) {
+      const asset = assetElement && findAsset(assetElement.dataset.assetId);
       if (asset?.type === "video") { event.preventDefault(); openVideoFrameViewer(asset); return; }
+      event.preventDefault();
+      els.fileInput.click();
+      return;
     }
-    const annotationElement = event.target.closest?.(".annotation");
-    if (!annotationElement || event.target.closest?.(".transform-handle")) return;
-    const result = findAnnotation(annotationElement.dataset.annotationId);
-    if (!result) return;
-    selectItem({ type: "annotation", assetId: result.asset.id, annotationId: result.annotation.id });
-    openAnnotationInput(result.asset, result.annotation, { editing: true, before: captureSnapshot() });
+    event.preventDefault();
+    openCanvasTemplatePicker();
   }, { capture: true });
 
   document.addEventListener("paste", (event) => {
@@ -3725,6 +3814,10 @@
   });
 
   els.emptyImportButton.addEventListener("click", () => els.fileInput.click());
+  document.querySelector('[data-action="close-template-picker"]').addEventListener("click", () => { document.querySelector("#canvasTemplatePicker").hidden = true; });
+  document.querySelector("#canvasTemplatePicker").addEventListener("click", (event) => {
+    if (event.target.id === "canvasTemplatePicker") event.currentTarget.hidden = true;
+  });
   els.fileInput.addEventListener("change", () => {
     [...els.fileInput.files].forEach(loadImageFile);
     els.fileInput.value = "";

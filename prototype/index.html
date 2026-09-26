@@ -299,6 +299,14 @@
         </div>
       </section>
 
+      <section id="canvasTemplatePicker" class="canvas-template-picker" hidden role="dialog" aria-modal="true" aria-label="Canvas templates">
+        <div class="canvas-template-card">
+          <header><div><strong>Canvas templates</strong><small>Reusable references with their annotations</small></div><button class="icon-button" data-action="close-template-picker" aria-label="Close templates">×</button></header>
+          <div data-field="template-list" class="canvas-template-list"></div>
+          <small>Double-click the canvas to open templates · Ctrl + double-click to import</small>
+        </div>
+      </section>
+
       <footer class="statusbar">
         <span id="statusText">Ready</span>
         <span id="saveText">Not saved yet</span>
@@ -307,6 +315,6 @@
       </footer>
     </main>
 
-    <script src="./app.js?v=20260814-video-job-restore-fix" defer></script>
+    <script src="./app.js?v=20260815-template-previews" defer></script>
   </body>
 </html>

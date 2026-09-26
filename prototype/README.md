@@ -1,6 +1,6 @@
 # AI Canvas interaction spike
 
-This dependency-free browser prototype validates the highest-risk interaction before the production stack is selected.
+This dependency-free browser prototype validates the highest-risk interaction before the production stack is selected
 
 ## Run locally
 
