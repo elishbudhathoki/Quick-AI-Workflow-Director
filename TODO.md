@@ -6,7 +6,7 @@
 - [x] Add cross-platform `setup.py` and `start.py`; keep user projects and settings outside the clone.
 - [x] Verify a new Windows virtual environment installs core and learned-map packages, runs the server/Canny smoke check, and generates Human pose.
 - [x] Add local Host/Origin checks and stop the Windows helper from killing unrelated port listeners.
-- [ ] Run the GitHub Actions Windows/macOS/Linux clean-clone matrix after the branch is pushed; fix any platform failures.
+- [x] GitHub Actions clean-clone matrix passed on Windows, macOS, and Linux with Python 3.11–3.13; optional learned-map packages imported on all three operating systems.
 - [ ] Test the browser UI and optional maps on a real macOS and Linux desktop, including GPU/CPU fallbacks.
 - [ ] Publish a public release tag after cross-platform checks and repository visibility review.
 
