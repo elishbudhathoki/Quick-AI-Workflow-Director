@@ -46,7 +46,7 @@
     providerModels: { openai: "gpt-5.6-terra", gemini: "gemini-3.6-flash" },
     providerId: "openai",
     imageDetail: "auto",
-    exportPreferences: { copyPrompt: true, openFolder: true, highestQualityMedia: false },
+    exportPreferences: { copyPrompt: true, openFolder: true, highestQualityMedia: true },
     workspacePreferences: { lastActiveProjectId: null, openProjectIds: [] },
     workspaceTabsInitialized: false,
     preferencesSaveTimer: null,
@@ -64,6 +64,10 @@
     videoJobs: new Map(),
     videoProxyJobs: new Map(),
     videoFilmstripCache: new Map(),
+    mapDownloads: new Map(),
+    pendingPreviews: new Map(),
+    mapEngine: localStorage.getItem("ai-canvas-map-engine") === "comfyui" ? "comfyui" : "built-in",
+    comfyUrl: localStorage.getItem("ai-canvas-comfy-url") || "http://127.0.0.1:8188",
   };
 
   const els = {
@@ -613,14 +617,85 @@
     reader.readAsDataURL(file);
   }
 
+  function createPendingPreview(key, title, options = {}) {
+    state.pendingPreviews.get(key)?.element.remove();
+    const rect = els.workspace.getBoundingClientRect();
+    const center = screenToWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    const preview = document.createElement("div");
+    preview.className = "pending-preview";
+    preview.setAttribute("role", "status");
+    preview.setAttribute("aria-label", title);
+    preview.style.left = `${Number.isFinite(options.x) ? options.x : center.x - 110}px`;
+    preview.style.top = `${Number.isFinite(options.y) ? options.y : center.y - 80}px`;
+    if (Number.isFinite(options.width)) preview.style.width = `${options.width}px`;
+    if (Number.isFinite(options.height)) preview.style.height = `${options.height}px`;
+    preview.innerHTML = `<div class="pending-preview-art"><span></span><i></i></div><div class="pending-preview-info"><strong></strong><small></small></div><div class="pending-preview-track"><span></span></div>`;
+    if (options.sourceSrc) {
+      const sourceImage = document.createElement("img");
+      sourceImage.className = "pending-preview-source";
+      sourceImage.alt = "";
+      sourceImage.src = options.sourceSrc;
+      preview.prepend(sourceImage);
+      preview.classList.add("has-source");
+    }
+    preview.querySelector("strong").textContent = title;
+    els.scene.append(preview);
+    const entry = { element: preview, x: parseFloat(preview.style.left), y: parseFloat(preview.style.top) };
+    state.pendingPreviews.set(key, entry);
+    updatePendingPreview(key, options.label || "Preparing…", options.progress);
+    return entry;
+  }
+
+  function updatePendingPreview(key, label, progress) {
+    const entry = state.pendingPreviews.get(key);
+    if (!entry) return;
+    const value = Number(progress);
+    const measured = Number.isFinite(value) && value > 0 && value < 100;
+    entry.element.classList.toggle("measured", measured);
+    entry.element.querySelector("small").textContent = measured ? `${label} · ${Math.round(value)}%` : label;
+    entry.element.querySelector(".pending-preview-track span").style.width = measured ? `${value}%` : "38%";
+  }
+
+  function removePendingPreview(key) {
+    state.pendingPreviews.get(key)?.element.remove();
+    state.pendingPreviews.delete(key);
+  }
+
+  function freeMapPreviewPosition(source, reserved = []) {
+    const width = source.width;
+    const height = source.height;
+    const bases = [
+      [source.x, source.y + source.height + 34],
+      [source.x + source.width + 34, source.y],
+      [source.x - width - 34, source.y],
+    ];
+    const occupied = [...state.assets.map((asset) => ({ x: asset.x, y: asset.y, width: asset.width, height: asset.height })), ...reserved];
+    for (const [baseX, baseY] of bases) {
+      for (let row = 0; row < 8; row += 1) {
+        for (let column = 0; column < 4; column += 1) {
+          const candidate = { x: baseX + column * (width + 24), y: baseY + row * (height + 24), width, height };
+          if (occupied.every((item) => candidate.x >= item.x + item.width + 8 || item.x >= candidate.x + width + 8 || candidate.y >= item.y + item.height + 8 || item.y >= candidate.y + height + 8)) {
+            return candidate;
+          }
+        }
+      }
+    }
+    return { x: source.x, y: source.y + source.height + 34, width, height };
+  }
+
   function addImage(src, name, options = {}) {
     const img = new Image();
+    let resolveCompletion;
+    const completion = new Promise((resolve, reject) => {
+      resolveCompletion = resolve;
+      img.addEventListener("error", () => (options.derivedMapType || options.strictLoad) ? reject(new Error("Image preview could not be loaded.")) : resolve(null), { once: true });
+    });
     img.onload = () => {
       const before = options.benchmark ? null : captureSnapshot();
-      const maxDimension = options.benchmark ? 320 : 620;
+      const maxDimension = options.displayMaxDimension || (options.benchmark ? 320 : 620);
       const ratio = Math.min(1, maxDimension / Math.max(img.naturalWidth, img.naturalHeight));
-      const width = Math.max(120, Math.round(img.naturalWidth * ratio));
-      const height = Math.max(90, Math.round(img.naturalHeight * ratio));
+      const width = Number.isFinite(options.displayWidth) ? options.displayWidth : Math.max(120, Math.round(img.naturalWidth * ratio));
+      const height = Number.isFinite(options.displayHeight) ? options.displayHeight : Math.max(90, Math.round(img.naturalHeight * ratio));
       const workspaceRect = els.workspace.getBoundingClientRect();
       const center = screenToWorld(
         workspaceRect.left + workspaceRect.width / 2,
@@ -634,14 +709,18 @@
         referenceNumber: nextReferenceNumber(),
         name,
         src,
+        sourceFile: options.sourceFile || null,
         naturalWidth: img.naturalWidth,
         naturalHeight: img.naturalHeight,
-        x: options.benchmark ? (index % 10) * 370 : center.x - width / 2 + offset,
-        y: options.benchmark ? Math.floor(index / 10) * 270 : center.y - height / 2 + offset,
+        x: Number.isFinite(options.x) ? options.x : options.benchmark ? (index % 10) * 370 : center.x - width / 2 + offset,
+        y: Number.isFinite(options.y) ? options.y : options.benchmark ? Math.floor(index / 10) * 270 : center.y - height / 2 + offset,
         width,
         height,
         sourceVideoId: options.sourceVideoId || null,
         sourceTimestampMs: Number.isFinite(options.sourceTimestampMs) ? options.sourceTimestampMs : null,
+        derivedFromAssetId: options.derivedFromAssetId || null,
+        derivedMapType: options.derivedMapType || null,
+        mapSource: options.mapSource || null,
         annotations: [],
       };
       if (options.benchmark) {
@@ -670,8 +749,10 @@
         pushHistory(before);
         setStatus("Image pasted · press R to annotate");
       }
+      resolveCompletion();
     };
     img.src = src;
+    return completion;
   }
 
   function addVideo(src, name, options = {}) {
@@ -708,8 +789,8 @@
         duration: Number.isFinite(video.duration) ? video.duration : 0,
         naturalWidth,
         naturalHeight,
-        x: center.x - width / 2 + index * 22,
-        y: center.y - height / 2 + index * 22,
+        x: Number.isFinite(options.x) ? options.x : center.x - width / 2 + index * 22,
+        y: Number.isFinite(options.y) ? options.y : center.y - height / 2 + index * 22,
         width,
         height,
         videoInstruction: "",
@@ -726,8 +807,9 @@
       pushHistory(before);
       ensureVideoScrubProxy(asset);
       setStatus("Video added · press R to describe how to use the whole clip");
+      options.onReady?.(asset);
     };
-    video.onerror = () => setStatus(`Could not load video: ${name}`);
+    video.onerror = () => { setStatus(`Could not load video: ${name}`); options.onError?.(); };
     video.src = src;
   }
 
@@ -1085,7 +1167,7 @@
 
   async function seekVideo(video, time) {
     const duration = Number.isFinite(video.duration) ? video.duration : 0;
-    const target = clamp(Number(time) || 0, 0, Math.max(0, duration - 0.04));
+    const target = clamp(Number(time) || 0, 0, Math.max(0, duration - 0.001));
     if (Math.abs(video.currentTime - target) > 0.015) {
       video.currentTime = target;
       await waitForMediaEvent(video, "seeked");
@@ -1113,6 +1195,7 @@
         dataUrl: canvas.toDataURL(highestQuality ? "image/png" : "image/jpeg", highestQuality ? undefined : 0.92),
         width: canvas.width,
         height: canvas.height,
+        time: video.currentTime,
       };
     } finally {
       video.removeAttribute("src");
@@ -1164,12 +1247,13 @@
         const time = times[index];
         const frame = await captureVideoFrame(asset, time);
         const baseName = asset.name.replace(/\.[^.]+$/, "") || "Video";
-        const name = `${baseName} · ${formatVideoTime(time)}.${state.exportPreferences.highestQualityMedia ? "png" : "jpg"}`;
+        const actualTime = frame.time;
+        const name = `${baseName} - ${formatVideoTime(actualTime)}.${state.exportPreferences.highestQualityMedia ? "png" : "jpg"}`;
         addImage(frame.dataUrl, name, {
           sourceVideoId: asset.id,
-          sourceTimestampMs: Math.round(time * 1000),
+          sourceTimestampMs: Math.round(actualTime * 1000),
         });
-        exportedFrames.push({ name, time, width: frame.width, height: frame.height });
+        exportedFrames.push({ name, time: actualTime, width: frame.width, height: frame.height });
       }
       setStatus(`${times.length} frame${times.length === 1 ? "" : "s"} extracted as image references`);
       return { ok: true, frames: exportedFrames };
@@ -1178,6 +1262,244 @@
       setStatus(error.message || "Frame extraction failed");
       return { ok: false, error };
     }
+  }
+
+  const MAP_LABELS = { canny: "Canny", lineart: "Outline", depth: "Depth", pose: "Human pose", softedge: "Soft edge", normal: "Normal", scribble: "Scribble", animal_pose: "Animal pose" };
+  const MAP_HINTS = { canny: "Sharp edges", lineart: "Drawn contours", depth: "Distance and shape", pose: "Human body, hands, and face", softedge: "Soft contours", normal: "Surface direction", scribble: "Loose sketch", animal_pose: "Animal joints via ComfyUI" };
+
+  function mapControlsMarkup(assetId) {
+    return `<section class="map-workbench" aria-label="Create reference maps">
+      <div class="map-workbench-heading"><span class="map-workbench-icon" aria-hidden="true">◈</span><div><strong>Reference maps</strong><small>Create local image guides from this reference</small></div></div>
+      <div class="map-engine-switch" role="group" aria-label="Map engine">
+        <label><input type="radio" name="map-engine" value="built-in" ${state.mapEngine === "built-in" ? "checked" : ""} /><span>Built-in</span></label>
+        <label><input type="radio" name="map-engine" value="comfyui" ${state.mapEngine === "comfyui" ? "checked" : ""} /><span>My ComfyUI models</span></label>
+      </div>
+      <div class="map-type-grid" role="group" aria-label="Map types">
+        ${Object.entries(MAP_LABELS).map(([kind, label]) => `<label class="map-type" title="${MAP_HINTS[kind]}"><input type="checkbox" value="${kind}" ${["canny", "lineart", "depth", "pose"].includes(kind) ? "checked" : ""} ${kind === "animal_pose" && state.mapEngine !== "comfyui" ? "disabled" : ""} /><span>${label}</span></label>`).join("")}
+      </div>
+      <div class="map-comfy-settings" ${state.mapEngine === "comfyui" ? "" : "hidden"}>
+        <label class="map-setting-label">Local ComfyUI address<input data-field="comfy-url" value="${escapeAttribute(state.comfyUrl)}" spellcheck="false" /></label>
+        <div class="map-workflow-row"><select data-field="workflow-kind" aria-label="Map type for workflow">${Object.entries(MAP_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join("")}</select><button class="button secondary" data-action="choose-workflow" type="button">Choose API workflow…</button></div>
+        <input data-field="workflow-file" type="file" accept=".json,application/json" hidden />
+        <div class="map-workflow-nodes" hidden><label>Image input<select data-field="workflow-input-node"></select></label><label>Map output<select data-field="workflow-output-node"></select></label><button class="button secondary" data-action="save-workflow" type="button">Use this workflow</button></div>
+        <small class="map-workflow-summary">Export a map workflow in API format from ComfyUI, with a LoadImage node and a SaveImage or PreviewImage node.</small>
+      </div>
+      <button class="button primary map-generate-button" data-action="generate-maps" type="button">Generate &amp; export maps</button>
+      <div class="map-secondary-actions"><button class="button secondary" data-action="download-maps" type="button" ${state.mapDownloads.has(assetId) ? "" : "hidden"}>Download maps ZIP</button><select data-field="own-map-kind" aria-label="Type of your map">${Object.entries(MAP_LABELS).map(([kind, label]) => `<option value="${kind}">${label}</option>`).join("")}</select><button class="button secondary" data-action="upload-map" type="button">Add my map image…</button></div>
+      <input data-field="own-map-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+      <small class="map-workbench-note">Maps process locally. Learned maps download publisher weights on first use; see THIRD_PARTY_NOTICES.md in the repo for sources and terms. Animal pose uses your local ComfyUI workflow.</small>
+      <output class="map-workbench-status" aria-live="polite"></output>
+    </section>`;
+  }
+
+  function bindMapControls(asset, sourceImage, sourceName) {
+    const workbench = els.selectionDetails.querySelector(".map-workbench");
+    const button = workbench.querySelector('[data-action="generate-maps"]');
+    const status = workbench.querySelector(".map-workbench-status");
+    const workflowKind = workbench.querySelector('[data-field="workflow-kind"]');
+    const workflowFile = workbench.querySelector('[data-field="workflow-file"]');
+    const workflowNodes = workbench.querySelector(".map-workflow-nodes");
+    const workflowSummary = workbench.querySelector(".map-workflow-summary");
+    const comfyUrl = workbench.querySelector('[data-field="comfy-url"]');
+    const downloadButton = workbench.querySelector('[data-action="download-maps"]');
+    let pendingWorkflow = null;
+    let pendingName = "";
+    let savedWorkflows = {};
+
+    const showWorkflowSummary = () => {
+      const saved = savedWorkflows[workflowKind.value];
+      workflowSummary.textContent = saved
+        ? `${MAP_LABELS[workflowKind.value]} uses ${saved.name} · ${saved.serverUrl}`
+        : `No ${MAP_LABELS[workflowKind.value]} workflow yet. Export one in API format from ComfyUI, with LoadImage and SaveImage or PreviewImage nodes.`;
+    };
+    fetch(`/api/projects/${encodeURIComponent(state.currentProject?.id || "")}/map-workflows`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Could not load map workflows.")))
+      .then((result) => { savedWorkflows = result.workflows || {}; showWorkflowSummary(); })
+      .catch(() => { if (state.mapEngine === "comfyui") workflowSummary.textContent = "Could not load saved workflows."; });
+    if (!state.mapDownloads.has(asset.id) && state.currentProject?.id) {
+      fetch(`/api/projects/${encodeURIComponent(state.currentProject.id)}/maps`)
+        .then((response) => response.ok ? response.json() : null)
+        .then((result) => {
+          const latest = result?.exports?.find((entry) => entry.sourceAssetId === asset.id);
+          if (latest) {
+            state.mapDownloads.set(asset.id, latest.downloadUrl);
+            downloadButton.hidden = false;
+          }
+        }).catch(() => {});
+    }
+    workflowKind.addEventListener("change", showWorkflowSummary);
+    workbench.querySelectorAll('input[name="map-engine"]').forEach((input) => input.addEventListener("change", () => {
+      state.mapEngine = input.value;
+      localStorage.setItem("ai-canvas-map-engine", state.mapEngine);
+      workbench.querySelector(".map-comfy-settings").hidden = state.mapEngine !== "comfyui";
+      const animalPose = workbench.querySelector('.map-type input[value="animal_pose"]');
+      animalPose.disabled = state.mapEngine !== "comfyui";
+      if (animalPose.disabled) animalPose.checked = false;
+    }));
+    comfyUrl.addEventListener("change", () => {
+      state.comfyUrl = comfyUrl.value.trim();
+      localStorage.setItem("ai-canvas-comfy-url", state.comfyUrl);
+    });
+    workbench.querySelector('[data-action="choose-workflow"]').addEventListener("click", () => workflowFile.click());
+    workflowFile.addEventListener("change", async () => {
+      const file = workflowFile.files?.[0];
+      if (!file) return;
+      try {
+        if (file.size > 2 * 1024 * 1024) throw new Error("Choose an API workflow smaller than 2 MB.");
+        const workflow = JSON.parse(await file.text());
+        if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) throw new Error("Choose a ComfyUI workflow exported in API format.");
+        const inputNodes = Object.entries(workflow).filter(([, node]) => node?.class_type === "LoadImage" && node.inputs?.image !== undefined);
+        const outputNodes = Object.entries(workflow).filter(([, node]) => ["SaveImage", "PreviewImage"].includes(node?.class_type));
+        if (!inputNodes.length || !outputNodes.length) throw new Error("The workflow needs a LoadImage node and a SaveImage or PreviewImage node.");
+        const fillNodes = (selector, nodes) => {
+          selector.replaceChildren(...nodes.map(([id, node]) => {
+            const option = document.createElement("option");
+            option.value = id;
+            option.textContent = `${node._meta?.title || node.class_type} · ${id}`;
+            return option;
+          }));
+        };
+        fillNodes(workbench.querySelector('[data-field="workflow-input-node"]'), inputNodes);
+        fillNodes(workbench.querySelector('[data-field="workflow-output-node"]'), outputNodes);
+        pendingWorkflow = workflow;
+        pendingName = file.name.replace(/\.json$/i, "");
+        workflowNodes.hidden = false;
+        workflowSummary.textContent = `${file.name} ready. Choose the image input and map output, then save.`;
+      } catch (error) {
+        pendingWorkflow = null;
+        workflowNodes.hidden = true;
+        workflowSummary.textContent = error.message || "Could not read workflow.";
+      } finally {
+        workflowFile.value = "";
+      }
+    });
+    workbench.querySelector('[data-action="save-workflow"]').addEventListener("click", async () => {
+      if (!pendingWorkflow || !state.currentProject?.id) return;
+      const saveButton = workbench.querySelector('[data-action="save-workflow"]');
+      saveButton.disabled = true;
+      try {
+        const response = await fetch(`/api/projects/${encodeURIComponent(state.currentProject.id)}/map-workflows`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: workflowKind.value, name: pendingName, serverUrl: comfyUrl.value.trim(),
+            inputNodeId: workbench.querySelector('[data-field="workflow-input-node"]').value,
+            outputNodeId: workbench.querySelector('[data-field="workflow-output-node"]').value,
+            workflow: pendingWorkflow }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not save workflow.");
+        savedWorkflows[workflowKind.value] = result.workflow;
+        state.comfyUrl = comfyUrl.value.trim();
+        localStorage.setItem("ai-canvas-comfy-url", state.comfyUrl);
+        pendingWorkflow = null;
+        workflowNodes.hidden = true;
+        showWorkflowSummary();
+        setStatus(`${MAP_LABELS[workflowKind.value]} workflow saved`);
+      } catch (error) {
+        workflowSummary.textContent = error.message || "Could not save workflow.";
+      } finally {
+        saveButton.disabled = false;
+      }
+    });
+    downloadButton.addEventListener("click", () => {
+      const url = state.mapDownloads.get(asset.id);
+      if (!url) return;
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "reference-maps.zip";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    });
+    const ownMapFile = workbench.querySelector('[data-field="own-map-file"]');
+    workbench.querySelector('[data-action="upload-map"]').addEventListener("click", () => ownMapFile.click());
+    ownMapFile.addEventListener("change", async () => {
+      const file = ownMapFile.files?.[0];
+      if (!file) return;
+      try {
+        if (!/^image\/(png|jpeg|webp)$/.test(file.type)) throw new Error("Choose a PNG, JPEG, or WebP map image.");
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error("Could not read the map image."));
+          reader.readAsDataURL(file);
+        });
+        const kind = workbench.querySelector('[data-field="own-map-kind"]').value;
+        await addImage(dataUrl, file.name, { derivedFromAssetId: asset.id, derivedMapType: kind,
+          mapSource: "uploaded", displayWidth: asset.width, displayHeight: asset.height,
+          x: asset.x, y: asset.y + asset.height + 34 });
+        fitAll();
+        setStatus(`${MAP_LABELS[kind]} map added from ${file.name}`);
+      } catch (error) {
+        status.textContent = error.message || "Could not add map image.";
+      } finally {
+        ownMapFile.value = "";
+      }
+    });
+    button.addEventListener("click", async () => {
+      const types = [...workbench.querySelectorAll('.map-type input:checked')].map((input) => input.value);
+      if (!types.length) { status.textContent = "Choose at least one map."; return; }
+      if (!state.currentProject?.id) { status.textContent = "Open or create a project first."; return; }
+      const reserved = [];
+      const pending = new Map(types.map((kind) => {
+        const key = uid("map-preview");
+        const position = freeMapPreviewPosition(asset, reserved);
+        reserved.push(position);
+        const entry = createPendingPreview(key, `${MAP_LABELS[kind]} map`, {
+          x: position.x,
+          y: position.y,
+          width: asset.width,
+          height: asset.height,
+          sourceSrc: asset.src,
+          label: "Generating preview…",
+        });
+        return [kind, { key, ...entry }];
+      }));
+      button.disabled = true;
+      button.textContent = "Generating maps…";
+      status.textContent = "Processing locally. Keep this project open.";
+      try {
+        const source = await sourceImage();
+        const bytes = await mediaSourceToBytes(source);
+        const response = await fetch(`/api/projects/${encodeURIComponent(state.currentProject.id)}/maps`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ imageBase64: exportDataToBase64(bytes), types, sourceName, sourceAssetId: asset.id,
+            engine: state.mapEngine }),
+        });
+        const result = await response.json();
+        if (response.status === 404) throw new Error("Maps are unavailable in the running server. Restart AI Canvas, then try again.");
+        if (!response.ok) throw new Error(result.error || "Map generation failed.");
+        for (const [index, map] of (result.maps || []).entries()) {
+          const slot = pending.get(map.type);
+          await addImage(map.dataUrl, `${sourceName.replace(/\.[^.]+$/, "")} - ${MAP_LABELS[map.type]} map.png`, {
+            derivedFromAssetId: asset.id,
+            derivedMapType: map.type,
+            mapSource: map.engine || "built-in",
+            displayWidth: asset.width,
+            displayHeight: asset.height,
+            x: slot?.x ?? asset.x + (index % 2) * (asset.width + 24),
+            y: slot?.y ?? asset.y + asset.height + 34 + Math.floor(index / 2) * (asset.height + 24),
+          });
+          if (slot) removePendingPreview(slot.key);
+        }
+        if (result.downloadUrl) state.mapDownloads.set(asset.id, result.downloadUrl);
+        if (result.maps?.length) fitAll();
+        const failures = Object.entries(result.errors || {});
+        const fallbackText = result.fallbacks?.length ? ` · built-in: ${result.fallbacks.map((type) => MAP_LABELS[type]).join(", ")}` : "";
+        const message = `${result.maps?.length || 0} map${result.maps?.length === 1 ? "" : "s"} exported${fallbackText}${failures.length ? ` · ${failures.map(([type, error]) => `${MAP_LABELS[type]}: ${error}`).join("; ")}` : ""}`;
+        status.textContent = message;
+        const visibleStatus = els.selectionDetails.querySelector(".map-workbench-status");
+        if (visibleStatus) visibleStatus.textContent = message;
+        setStatus(message);
+      } catch (error) {
+        status.textContent = error.message || "Map generation failed.";
+        setStatus(status.textContent);
+      } finally {
+        pending.forEach(({ key }) => removePendingPreview(key));
+        button.disabled = false;
+        button.textContent = "Generate & export maps";
+      }
+    });
   }
 
   function cropAnnotation(asset, annotation) {
@@ -1262,7 +1584,7 @@
       card.className = "reference-card";
       if (reference.kind === "video") {
         card.innerHTML = `
-          <div class="reference-video-thumb" aria-hidden="true">â–¶</div>
+          <div class="reference-video-thumb" aria-hidden="true">▶</div>
           <div class="reference-copy">
             <strong>${escapeHtml(parseInstruction(reference.instruction).label)}</strong>
             <span>Whole video · ${formatDuration(reference.asset.duration)}</span>
@@ -1428,13 +1750,24 @@
         <h2 class="selection-title">Image</h2>
         <div class="selection-media-card">
           <img src="${escapeAttribute(asset.src)}" alt="${escapeAttribute(asset.name)} preview" />
-          <div><strong>${formatVideoResolution(asset.naturalWidth, asset.naturalHeight)}</strong><span>Source image</span></div>
+          <div><strong>${formatVideoResolution(asset.naturalWidth, asset.naturalHeight)}</strong><span>${asset.derivedMapType ? "Map image" : "Source image"}</span></div>
         </div>
         <div class="selection-field"><label>Name</label><input data-field="asset-name" value="${escapeAttribute(asset.name)}" /></div>
         ${asset.mediaError ? `<p class="selection-media-error">${escapeHtml(asset.mediaError)}</p>` : ""}
+        ${asset.derivedMapType ? `<div class="map-asset-detail"><span>${escapeHtml(MAP_LABELS[asset.derivedMapType] || "Custom")} map · ${escapeHtml(asset.mapSource || "local")}</span><button class="button secondary" data-action="download-map-image" type="button">Download image</button></div>` : ""}
         <p class="muted">${asset.annotations.length} annotation${asset.annotations.length === 1 ? "" : "s"}</p>
+        ${mapControlsMarkup(asset.id)}
         <button class="button secondary" data-action="save-canvas-template" type="button">Save as template</button>
       `;
+      bindMapControls(asset, () => asset.src, asset.name);
+      els.selectionDetails.querySelector('[data-action="download-map-image"]')?.addEventListener("click", () => {
+        const link = document.createElement("a");
+        link.href = asset.src;
+        link.download = asset.name;
+        document.body.append(link);
+        link.click();
+        link.remove();
+      });
       const input = els.selectionDetails.querySelector('[data-field="asset-name"]');
       let beforeEdit = null;
       input.addEventListener("focus", () => { beforeEdit = captureSnapshot(); });
@@ -1460,8 +1793,10 @@
       </div>
       <div class="selection-field"><label>Raw instruction</label><input data-field="raw" value="${escapeAttribute(annotation.rawInstruction)}" /></div>
       <div class="selection-field"><label>Label</label><input data-field="label" value="${escapeAttribute(annotation.label)}" /></div>
+      ${mapControlsMarkup(asset.id)}
       <button class="button secondary" data-action="save-canvas-template" type="button">Save crop as template</button>
     `;
+    bindMapControls(asset, () => cropAnnotation(asset, annotation), `${asset.name} ${annotation.letter}`);
     const annotationPreview = els.selectionDetails.querySelector('[data-field="annotation-preview"]');
     cropAnnotation(asset, annotation).then((src) => {
       if (state.selected?.annotationId === annotation.id && annotationPreview.isConnected) annotationPreview.src = src;
@@ -1753,7 +2088,7 @@
   function renderExportPreferences() {
     els.copyPromptOnExportInput.checked = state.exportPreferences.copyPrompt;
     els.openFolderOnExportInput.checked = state.exportPreferences.openFolder;
-    els.highestQualityMediaInput.checked = state.exportPreferences.highestQualityMedia;
+    els.highestQualityMediaInput.checked = true;
   }
 
   async function loadExportPreferences() {
@@ -1764,7 +2099,7 @@
       state.exportPreferences = {
         copyPrompt: result.preferences?.copyPromptOnExport !== false,
         openFolder: result.preferences?.openFolderOnExport !== false,
-        highestQualityMedia: result.preferences?.highestQualityMedia === true,
+        highestQualityMedia: true,
       };
       state.workspacePreferences = {
         lastActiveProjectId: result.preferences?.lastActiveProjectId || null,
@@ -1781,7 +2116,7 @@
     state.exportPreferences = {
       copyPrompt: els.copyPromptOnExportInput.checked,
       openFolder: els.openFolderOnExportInput.checked,
-      highestQualityMedia: els.highestQualityMediaInput.checked,
+      highestQualityMedia: true,
     };
     try {
       const response = await fetch("/api/preferences", {
@@ -2002,7 +2337,7 @@
   async function duplicateProject(projectId) {
     try {
       if (state.currentProject?.id === projectId && !(await saveCurrentProject({ quiet: true, refresh: false }))) return;
-      setStatus("Duplicating projectâ€¦");
+      setStatus("Duplicating project…");
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/duplicate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2136,6 +2471,8 @@
       state.history.past = [];
       state.history.future = [];
       state.closedProjectIds.delete(project.id);
+      state.pendingPreviews.forEach(({ element }) => element.remove());
+      state.pendingPreviews.clear();
       setCurrentProject(project);
       applySnapshot(preservedSnapshot || {}, { save: false, preserveProviderSettings: true });
       els.newProjectNameInput.value = "";
@@ -2445,6 +2782,11 @@
           filename,
           sourceAssetName: asset.name,
           sourceReferenceNumber: asset.referenceNumber,
+          sourceVideoId: asset.sourceVideoId || null,
+          sourceTimestampMs: asset.sourceTimestampMs ?? null,
+          derivedFromAssetId: asset.derivedFromAssetId || null,
+          derivedMapType: asset.derivedMapType || null,
+          mapSource: asset.mapSource || null,
           annotationId: annotation.id,
           label: annotation.label,
           instruction: annotation.rawInstruction,
@@ -2587,7 +2929,7 @@
           result.folderOpened ? "folder opened" : "",
           state.exportPreferences.openFolder && !result.folderOpened ? "folder could not be opened" : "",
         ].filter(Boolean);
-        setStatus(`${files.length} files saved in ${result.folder}${actions.length ? ` Â· ${actions.join(" Â· ")}` : ""}`);
+        setStatus(`${files.length} files saved in ${result.folder}${actions.length ? ` · ${actions.join(" · ")}` : ""}`);
       }
     } catch (error) {
       if (error?.name === "AbortError") setStatus("Export cancelled");
@@ -2872,6 +3214,31 @@
     });
   }
 
+  let lastVideoPointer = null;
+  let lastVideoOpenAt = 0;
+  els.workspace.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || state.tool !== "select") return;
+    const assetElement = event.target.closest?.(".asset");
+    const asset = assetElement && findAsset(assetElement.dataset.assetId);
+    const now = performance.now();
+    const previous = lastVideoPointer;
+    const sameSpot = previous && now - previous.at < 430
+      && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 10;
+    const previousAsset = sameSpot && findAsset(previous.assetId);
+    if (previousAsset?.type === "video" || previousAsset?.type === "image") {
+      lastVideoPointer = null;
+      lastVideoOpenAt = now;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (previousAsset.type === "video") openVideoFrameViewer(previousAsset);
+      else openMapRadialMenu(previousAsset, event.clientX, event.clientY);
+      return;
+    }
+    lastVideoPointer = ["video", "image"].includes(asset?.type) && !event.target.closest?.(".transform-handle")
+      ? { assetId: asset.id, x: event.clientX, y: event.clientY, at: now }
+      : null;
+  }, { capture: true });
+
   els.workspace.addEventListener("pointerdown", (event) => {
     if (event.button === 1 || state.isSpaceDown || state.tool === "hand") {
       state.interaction = {
@@ -3019,6 +3386,8 @@
           type: "move-assets",
           pointerId: event.pointerId,
           startPoint: point,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
           assets: getSelectedAssets().map((selectedAsset) => ({
             asset: selectedAsset,
             x: selectedAsset.x,
@@ -3034,6 +3403,8 @@
         type: "move-asset",
         pointerId: event.pointerId,
         asset,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
         offsetX: point.x - asset.x,
         offsetY: point.y - asset.y,
         before: captureSnapshot(),
@@ -3075,6 +3446,8 @@
       return;
     }
     if (interaction.type === "move-asset") {
+      if (Math.hypot(event.clientX - interaction.startClientX, event.clientY - interaction.startClientY) < 5) return;
+      interaction.moved = true;
       const point = screenToWorld(event.clientX, event.clientY);
       interaction.asset.x = point.x - interaction.offsetX;
       interaction.asset.y = point.y - interaction.offsetY;
@@ -3083,6 +3456,8 @@
       return;
     }
     if (interaction.type === "move-assets") {
+      if (Math.hypot(event.clientX - interaction.startClientX, event.clientY - interaction.startClientY) < 5) return;
+      interaction.moved = true;
       const point = screenToWorld(event.clientX, event.clientY);
       const dx = point.x - interaction.startPoint.x;
       const dy = point.y - interaction.startPoint.y;
@@ -3179,13 +3554,14 @@
         : "Selection cleared");
     }
     if (interaction.type === "pan") scheduleSave();
-    if (["move-asset", "move-assets", "resize-asset"].includes(interaction.type)) {
-      pushHistory(interaction.before);
-      setStatus(interaction.type === "resize-asset"
-        ? "Image resized"
-        : interaction.type === "move-assets"
-          ? `${interaction.assets.length} images moved`
-          : "Image moved");
+    if ((interaction.type === "resize-asset" || interaction.moved) && ["move-asset", "move-assets", "resize-asset"].includes(interaction.type)) {
+      if (pushHistory(interaction.before)) {
+        setStatus(interaction.type === "resize-asset"
+          ? "Image resized"
+          : interaction.type === "move-assets"
+            ? `${interaction.assets.length} images moved`
+            : "Image moved");
+      }
     }
     if (["move-annotation", "move-annotations", "resize-annotation"].includes(interaction.type)) {
       pushHistory(interaction.before);
@@ -3230,8 +3606,12 @@
     const exportButtons = [exportFirstFrameButton, exportFrameButton, exportLastFrameButton];
     const filmstrip = viewer.querySelector('[data-field="viewer-filmstrip"]');
     const rangeLabel = viewer.querySelector('[data-field="viewer-range"]');
+    const overview = viewer.querySelector('[data-field="viewer-overview"]');
+    const overviewEnd = viewer.querySelector('[data-field="viewer-overview-end"]');
     const session = (Number(viewer.dataset.session) || 0) + 1;
-    let timelineZoom = 0;
+    let timelineZoom = 1;
+    let frameRate = 30;
+    let overviewDragging = false;
     let zoomRenderTimer = null;
     let timelineGeneration = 0;
     let timelineStart = 0;
@@ -3270,15 +3650,15 @@
       viewer.hidden = true;
     };
     const timelineWindow = (duration) => {
-      const center = clamp(video.currentTime || openingTime, 0, duration);
-      const minimumSpan = Math.min(duration, 1.2);
+      const center = clamp(Number.isFinite(video.currentTime) ? video.currentTime : openingTime, 0, duration);
+      const minimumSpan = Math.min(duration, 30 / frameRate);
       const span = duration <= 0 ? 0 : duration * Math.pow(minimumSpan / duration, timelineZoom);
       const start = clamp(center - span / 2, 0, Math.max(0, duration - span));
       return {
         start,
         end: Math.min(duration, start + span),
-        count: Math.round(12 + timelineZoom * 10),
-        label: timelineZoom < .04 ? "Entire video" : span <= 1.25 ? "Frame precision" : `${span.toFixed(span < 10 ? 1 : 0)} second window`,
+        count: Math.min(32, Math.max(2, Math.round(span * frameRate) + 1)),
+        label: timelineZoom > .98 ? `${frameRate} fps · frame detail` : `${span.toFixed(span < 10 ? 1 : 0)} second window`,
       };
     };
     const scrollToSelectedTime = (behavior = "auto") => {
@@ -3291,13 +3671,12 @@
     };
     const sync = () => {
       time.value = formatVideoTime(video.currentTime);
+      const duration = video.duration || asset.duration || 0;
+      if (!overviewDragging && duration) overview.value = String(clamp(video.currentTime || 0, 0, duration));
+      overview.style.setProperty("--overview-progress", `${duration ? ((Number(overview.value) / duration) * 100).toFixed(2) : 0}%`);
       const buttons = [...filmstrip.querySelectorAll(".video-filmstrip-frame")];
-      let closest = null;
-      buttons.forEach((button) => {
-        const active = !closest || Math.abs(Number(button.dataset.time) - video.currentTime) < Math.abs(Number(closest.dataset.time) - video.currentTime);
-        button.classList.toggle("active", active);
-        if (active) closest = button;
-      });
+      const closest = buttons.reduce((best, button) => !best || Math.abs(Number(button.dataset.time) - video.currentTime) < Math.abs(Number(best.dataset.time) - video.currentTime) ? button : best, null);
+      buttons.forEach((button) => button.classList.toggle("active", button === closest));
     };
     const seekTo = (value, { precise = false } = {}) => {
       const duration = video.duration || asset.duration || 0;
@@ -3314,7 +3693,8 @@
     };
     const stepFrame = (direction) => {
       video.pause();
-      seekTo((video.currentTime || 0) + direction / 30, { precise: true });
+      const frameIndex = Math.round((video.currentTime || 0) * frameRate);
+      seekTo((frameIndex + direction) / frameRate, { precise: true });
     };
     const exportFrameAt = async (targetTime, label) => {
       if (exportingFrame) return;
@@ -3371,27 +3751,9 @@
         if (Date.now() < ignoreClickUntil) return;
         video.pause();
         seekTo(frameTime, { precise: true });
-        suppressScroll = true;
-        button.scrollIntoView({ behavior: "auto", inline: "center", block: "nearest" });
-        requestAnimationFrame(() => requestAnimationFrame(() => { suppressScroll = false; }));
       };
       filmstrip.append(button);
       return button;
-    };
-    const paintVisibleFrame = () => {
-      if (video.readyState < 2) return;
-      const buttons = [...filmstrip.querySelectorAll(".video-filmstrip-frame")];
-      if (!buttons.length) return;
-      const closest = buttons.reduce((best, button) => !best || Math.abs(Number(button.dataset.time) - video.currentTime) < Math.abs(Number(best.dataset.time) - video.currentTime) ? button : best, null);
-      if (!closest || closest.querySelector("img")) return;
-      try {
-        const previewSrc = drawVideoIntoCanvas(video, 128).toDataURL("image/jpeg", 0.66);
-        const image = document.createElement("img");
-        image.alt = `Current frame at ${formatVideoTime(video.currentTime)}`;
-        image.src = previewSrc;
-        closest.classList.remove("loading");
-        closest.append(image);
-      } catch { /* The background thumbnail decoder will fill it if the frame is not drawable yet. */ }
     };
     const renderFilmstrip = async () => {
       const duration = video.duration || asset.duration || 0;
@@ -3402,8 +3764,8 @@
       timelineEnd = window.end;
       rangeLabel.textContent = window.label;
       const zoomBucket = Math.round(timelineZoom * 20);
-      const anchor = timelineZoom < .04 ? "all" : `${window.start.toFixed(2)}-${window.end.toFixed(2)}`;
-      const key = `${asset.id}:zoom-${zoomBucket}:${anchor}`;
+      const anchor = timelineZoom < .04 ? "all" : `${window.start.toFixed(3)}-${window.end.toFixed(3)}`;
+      const key = `${asset.id}:${frameRate}:zoom-${zoomBucket}:${anchor}`;
       const cachedFrames = state.videoFilmstripCache.get(key);
       filmstrip.innerHTML = "";
       const targets = Array.from({ length: window.count }, (_, index) => window.start + ((window.end - window.start) * index) / Math.max(1, window.count - 1));
@@ -3414,18 +3776,9 @@
         return;
       }
       const slots = targets.map((frameTime) => appendFilmstripFrame(frameTime, null));
-      paintVisibleFrame();
       let source;
       const frames = new Array(targets.length);
       try {
-        if (video.readyState >= 2) {
-          const closestIndex = targets.reduce((best, frameTime, index) => Math.abs(frameTime - video.currentTime) < Math.abs(targets[best] - video.currentTime) ? index : best, 0);
-          const immediateSrc = drawVideoIntoCanvas(video, 128).toDataURL("image/jpeg", 0.66);
-          const immediateSlot = slots[closestIndex];
-          immediateSlot.classList.remove("loading");
-          const immediateImage = document.createElement("img"); immediateImage.alt = `Frame at ${formatVideoTime(targets[closestIndex])}`; immediateImage.src = immediateSrc;
-          immediateSlot.append(immediateImage);
-        }
         requestAnimationFrame(() => scrollToSelectedTime());
         source = await loadVideoForFrames({ ...asset, src: asset.scrubProxySrc || asset.src });
         const priority = targets.map((_, index) => index).sort((a, b) => Math.abs(targets[a] - video.currentTime) - Math.abs(targets[b] - video.currentTime));
@@ -3444,7 +3797,10 @@
           await new Promise((resolve) => requestAnimationFrame(resolve));
         }
         state.videoFilmstripCache.set(key, frames.filter(Boolean));
+        while (state.videoFilmstripCache.size > 16) state.videoFilmstripCache.delete(state.videoFilmstripCache.keys().next().value);
         sync();
+      } catch {
+        if (isCurrent() && generation === timelineGeneration) rangeLabel.textContent = "Preview frames unavailable · overview and arrows still work";
       } finally {
         if (source) { source.removeAttribute("src"); source.load(); }
       }
@@ -3490,49 +3846,184 @@
       filmstrip.scrollLeft += event.deltaX || event.deltaY;
     };
     filmstrip.ondblclick = () => {
-      timelineZoom = clamp(timelineZoom + .28, 0, 1);
+      timelineZoom = 1;
       renderFilmstrip();
     };
+    overview.onpointerdown = () => { overviewDragging = true; };
+    overview.oninput = () => {
+      overviewDragging = true;
+      video.pause();
+      seekTo(overview.value);
+      overview.style.setProperty("--overview-progress", `${(Number(overview.value) / Math.max(1, Number(overview.max)) * 100).toFixed(2)}%`);
+    };
+    overview.onchange = () => {
+      overviewDragging = false;
+      seekTo(overview.value, { precise: true });
+      clearTimeout(zoomRenderTimer);
+      zoomRenderTimer = setTimeout(renderFilmstrip, 90);
+    };
+    overview.onpointerup = () => { overviewDragging = false; };
     viewer.querySelector('[data-action="viewer-previous-frame"]').onclick = () => stepFrame(-1);
     viewer.querySelector('[data-action="viewer-next-frame"]').onclick = () => stepFrame(1);
     video.ontimeupdate = () => {
       sync();
-      if (!video.paused && !dragStart) scrollToSelectedTime();
+      if (!video.paused && !dragStart && !overviewDragging) {
+        if (video.currentTime > timelineEnd || video.currentTime < timelineStart) renderFilmstrip();
+        else scrollToSelectedTime();
+      }
     };
     video.onseeked = () => {
       sync();
+      if (!dragStart && !overviewDragging) {
+        if (video.currentTime > timelineEnd || video.currentTime < timelineStart) renderFilmstrip();
+        else scrollToSelectedTime();
+      }
       if (!exportingFrame) exportButtons.forEach((button) => { button.disabled = false; });
     };
-    video.onloadeddata = paintVisibleFrame;
     video.onloadedmetadata = () => {
       viewer.querySelector('[data-field="viewer-resolution"]').textContent = formatVideoResolution(asset.naturalWidth || video.videoWidth, asset.naturalHeight || video.videoHeight);
       viewer.querySelector('[data-field="viewer-duration"]').textContent = formatDuration(video.duration || asset.duration);
       if (video.videoWidth && video.videoHeight) video.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
       fitVideoToStage();
       video.currentTime = clamp(openingTime, 0, video.duration || asset.duration || 0);
+      overview.max = String(video.duration || asset.duration || 1);
+      overviewEnd.textContent = formatDuration(video.duration || asset.duration);
+      sync();
       renderFilmstrip();
     };
     video.src = asset.scrubProxySrc || asset.src;
+    if (state.currentProject?.id && asset.sourceFile) {
+      fetch(`/api/projects/${encodeURIComponent(state.currentProject.id)}/videos/metadata`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceFile: asset.sourceFile }),
+      }).then((response) => response.ok ? response.json() : null).then((metadata) => {
+        if (!isCurrent() || !metadata?.frameRate) return;
+        frameRate = metadata.frameRate;
+        if (video.readyState >= 1) renderFilmstrip();
+      }).catch(() => {});
+    }
     window.addEventListener("resize", fitVideoToStage);
     exportFrameButton.onclick = () => exportFrameAt(video.currentTime || 0, "current frame");
     exportFirstFrameButton.onclick = () => exportFrameAt(0, "first frame");
     exportLastFrameButton.onclick = () => {
       const duration = video.duration || asset.duration || 0;
-      exportFrameAt(Math.max(0, duration - 1 / 30), "last frame");
+      exportFrameAt(Math.max(0, duration - 1 / frameRate), "last frame");
     };
     viewer.querySelector('[data-action="close-frame-viewer"]').onclick = close;
     viewer.onclick = (event) => { if (event.target === viewer) close(); };
   }
 
+  let mapRadialMenu = null;
+  function closeMapRadialMenu() {
+    mapRadialMenu?.remove();
+    mapRadialMenu = null;
+  }
+
+  function focusCanvasAsset(asset) {
+    selectItem({ type: "asset", assetId: asset.id });
+    setActivePanelTab("selection");
+    const rect = els.workspace.getBoundingClientRect();
+    state.panX = rect.width / 2 - (asset.x + asset.width / 2) * state.scale;
+    state.panY = rect.height / 2 - (asset.y + asset.height / 2) * state.scale;
+    renderTransform();
+    scheduleSave();
+  }
+
+  function openMapRadialMenu(clickedAsset, clientX, clientY) {
+    closeMapRadialMenu();
+    const source = findAsset(clickedAsset.derivedFromAssetId) || clickedAsset;
+    if (source.type !== "image") return;
+    const menu = document.createElement("div");
+    menu.className = "map-radial-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", `Maps for ${source.name}`);
+    const diameter = 344;
+    menu.style.left = `${clamp(clientX - diameter / 2, 8, Math.max(8, innerWidth - diameter - 8))}px`;
+    menu.style.top = `${clamp(clientY - diameter / 2, 8, Math.max(8, innerHeight - diameter - 8))}px`;
+    const center = document.createElement("div");
+    center.className = "map-radial-center";
+    center.innerHTML = `<img alt="" /><span>Maps</span>`;
+    center.querySelector("img").src = source.src;
+    menu.append(center);
+    const symbols = { canny: "◇", lineart: "✎", depth: "◒", pose: "♙", softedge: "〰", normal: "◐", scribble: "⌁", animal_pose: "✳" };
+    Object.entries(MAP_LABELS).forEach(([kind, label], index) => {
+      const existing = [...state.assets].reverse().find((item) => item.derivedFromAssetId === source.id && item.derivedMapType === kind);
+      const angle = (-90 + index * 45) * Math.PI / 180;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `map-radial-option${existing ? " has-map" : ""}`;
+      button.setAttribute("role", "menuitem");
+      button.setAttribute("aria-label", `${existing ? "Open" : "Generate"} ${label} map`);
+      button.style.left = `${172 + Math.cos(angle) * 126}px`;
+      button.style.top = `${172 + Math.sin(angle) * 126}px`;
+      const visual = existing ? document.createElement("img") : document.createElement("span");
+      visual.className = existing ? "map-radial-thumb" : "map-radial-symbol";
+      if (existing) { visual.src = existing.src; visual.alt = ""; }
+      else visual.textContent = symbols[kind];
+      const caption = document.createElement("small");
+      caption.textContent = label;
+      button.append(visual, caption);
+      button.addEventListener("click", () => {
+        closeMapRadialMenu();
+        if (existing) { focusCanvasAsset(existing); return; }
+        selectItem({ type: "asset", assetId: source.id });
+        setActivePanelTab("selection");
+        const workbench = els.selectionDetails.querySelector(".map-workbench");
+        if (!workbench) return;
+        if (kind === "animal_pose" && state.mapEngine !== "comfyui") {
+          const engine = workbench.querySelector('input[name="map-engine"][value="comfyui"]');
+          engine.checked = true;
+          engine.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        workbench.querySelectorAll(".map-type input").forEach((input) => { input.checked = input.value === kind; });
+        workbench.querySelector('[data-action="generate-maps"]').click();
+      });
+      menu.append(button);
+    });
+    document.body.append(menu);
+    mapRadialMenu = menu;
+    menu.querySelector("button")?.focus();
+  }
+
+  document.addEventListener("pointerdown", (event) => {
+    if (mapRadialMenu && !mapRadialMenu.contains(event.target)) closeMapRadialMenu();
+  }, { capture: true });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeMapRadialMenu();
+  });
+
   els.workspace.addEventListener("dblclick", (event) => {
+    if (performance.now() - lastVideoOpenAt < 600) { event.preventDefault(); event.stopPropagation(); return; }
     const assetElement = event.target.closest?.(".asset");
+    const asset = assetElement && findAsset(assetElement.dataset.assetId);
+    if (asset?.type === "video" && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      openVideoFrameViewer(asset);
+      return;
+    }
     if (event.ctrlKey || event.metaKey) {
-      const asset = assetElement && findAsset(assetElement.dataset.assetId);
-      if (asset?.type === "video") { event.preventDefault(); openVideoFrameViewer(asset); return; }
       event.preventDefault();
       els.fileInput.click();
       return;
     }
+    const annotationElement = event.target.closest?.(".annotation");
+    if (annotationElement && !event.target.closest?.(".transform-handle")) {
+      const result = findAnnotation(annotationElement.dataset.annotationId);
+      if (result) {
+        event.preventDefault();
+        selectItem({ type: "annotation", assetId: result.asset.id, annotationId: result.annotation.id });
+        openAnnotationInput(result.asset, result.annotation, { editing: true, before: captureSnapshot() });
+        return;
+      }
+    }
+    if (asset?.type === "image") {
+      event.preventDefault();
+      event.stopPropagation();
+      openMapRadialMenu(asset, event.clientX, event.clientY);
+      return;
+    }
+    if (assetElement) return;
     event.preventDefault();
     openCanvasTemplatePicker();
   }, { capture: true });
@@ -3553,9 +4044,27 @@
     const text = event.clipboardData?.getData("text/plain")?.trim() || "";
     if (/^https?:\/\/\S+$/i.test(text)) {
       event.preventDefault();
-      importVideoUrl(text);
+      if (/\.(png|jpe?g|webp)(?:[?#]|$)/i.test(text)) importImageUrl(text);
+      else importVideoUrl(text);
     }
   });
+
+  async function importImageUrl(url) {
+    if (!state.currentProject) { setStatus("Open or create a project before importing an image link"); return; }
+    const key = uid("image-download");
+    const pending = createPendingPreview(key, "Image from link", { label: "Downloading image…" });
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(state.currentProject.id)}/images/import-url`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "Image link import failed.");
+      await addImage(result.src, result.name, { x: pending.x, y: pending.y, sourceFile: result.sourceFile, strictLoad: true });
+      setStatus(`Image downloaded · ${result.name}`);
+    } catch (error) {
+      setStatus(error.message || "Image link import failed.");
+    } finally { removePendingPreview(key); }
+  }
 
   function videoJobTitle(job) {
     try { return new URL(job.url).hostname.replace(/^www\./, ""); } catch { return "Public video"; }
@@ -3576,9 +4085,12 @@
       job.added = true;
       return;
     }
+    const pending = state.pendingPreviews.get(job.id);
     addVideo(job.result.src, job.result.name, {
       mimeType: job.result.mimeType, sourceFile: job.result.sourceFile, sourceUrl: job.result.sourceUrl,
       sourceTitle: job.result.title, sourceExtractor: job.result.extractor, retrievedAt: job.result.retrievedAt,
+      x: pending?.x, y: pending?.y,
+      onReady: () => removePendingPreview(job.id), onError: () => removePendingPreview(job.id),
     });
     job.added = true;
   }
@@ -3594,7 +4106,7 @@
       const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
       const resolution = job.result ? formatVideoResolution(job.result.width, job.result.height) : "";
       const meta = [videoJobStateLabel(job), resolution].filter(Boolean).join(" · ");
-      card.innerHTML = `<strong class="video-job-title">${escapeHtml(job.result?.title || videoJobTitle(job))}</strong><span class="video-job-meta">${escapeHtml(meta)}</span>${["resolving", "downloading", "processing"].includes(job.state) ? `<div class="video-job-progress"><span style="width: ${progress}%"></span></div>` : ""}<div class="video-job-actions"></div>`;
+      card.innerHTML = `<div class="video-job-visual" aria-hidden="true"><span>▶</span></div><div class="video-job-content"><strong class="video-job-title">${escapeHtml(job.result?.title || videoJobTitle(job))}</strong><span class="video-job-meta">${escapeHtml(meta)}</span>${["resolving", "downloading", "processing"].includes(job.state) ? `<div class="video-job-progress ${job.state === "downloading" && progress > 0 ? "measured" : "indeterminate"}"><span style="width: ${progress}%"></span></div>` : ""}<div class="video-job-actions"></div></div>${job.state === "downloading" && progress > 0 ? `<span class="video-job-percent">${progress}%</span>` : ""}`;
       const actions = card.querySelector(".video-job-actions");
       if (["resolving", "downloading", "processing"].includes(job.state)) {
         const cancel = document.createElement("button");
@@ -3621,9 +4133,10 @@
       const latest = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(latest.error || "Video download status could not be read");
       Object.assign(job, latest);
+      updatePendingPreview(job.id, videoJobStateLabel(job), job.state === "downloading" ? job.progress : undefined);
       renderVideoJobs();
       if (job.state === "ready") { addCompletedVideo(job); renderVideoJobs(); setStatus(`Video downloaded · ${formatVideoResolution(job.result.width, job.result.height)}`); return; }
-      if (["failed", "cancelled"].includes(job.state)) { setStatus(videoJobStateLabel(job)); return; }
+      if (["failed", "cancelled"].includes(job.state)) { removePendingPreview(job.id); setStatus(videoJobStateLabel(job)); return; }
     }
   }
 
@@ -3638,6 +4151,7 @@
       job.added = state.assets.some((asset) => asset.sourceFile && asset.sourceFile === job.result?.sourceFile);
       state.videoJobs.set(job.id, job);
       if (["queued", "resolving", "downloading", "processing"].includes(job.state)) {
+        createPendingPreview(job.id, videoJobTitle(job), { label: videoJobStateLabel(job), progress: job.progress });
         pollVideoJob(job).catch((error) => { job.state = "failed"; job.error = error.message || "Video download status could not be read"; renderVideoJobs(); });
       }
     });
@@ -3650,6 +4164,7 @@
       const latest = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(latest.error || "Video download could not be cancelled");
       Object.assign(job, latest); renderVideoJobs(); setStatus("Video download cancelled");
+      removePendingPreview(job.id);
     } catch (error) { setStatus(error.message || "Video download could not be cancelled"); }
   }
 
@@ -3659,6 +4174,7 @@
       const retry = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(retry.error || "Video download could not be retried");
       state.videoJobs.set(retry.id, retry); renderVideoJobs();
+      createPendingPreview(retry.id, videoJobTitle(retry), { label: "Retrying download…" });
       pollVideoJob(retry).catch((error) => { retry.state = "failed"; retry.error = error.message || "Video download status could not be read"; renderVideoJobs(); });
     } catch (error) { setStatus(error.message || "Video download could not be retried"); }
   }
@@ -3668,10 +4184,12 @@
       setStatus("Open or create a project before importing a video link");
       return;
     }
-    setStatus("Downloading video link into the current projectâ€¦");
+    setStatus("Downloading video link into the current project…");
+    const directFile = /\.(mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i.test(url);
+    const key = directFile ? uid("video-download") : null;
+    const pending = key ? createPendingPreview(key, "Video from link", { label: "Downloading video…" }) : null;
     try {
       const projectId = encodeURIComponent(state.currentProject.id);
-      const directFile = /\.(mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i.test(url);
       if (!directFile) return await importVideoPage(projectId, url);
       const response = await fetch(`/api/projects/${projectId}/videos/import-url`, {
         method: "POST",
@@ -3680,49 +4198,44 @@
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || "Video link import failed");
-      addVideo(result.src, result.name, { mimeType: result.mimeType, sourceFile: result.sourceFile });
+      addVideo(result.src, result.name, { mimeType: result.mimeType, sourceFile: result.sourceFile,
+        x: pending?.x, y: pending?.y,
+        onReady: () => removePendingPreview(key), onError: () => removePendingPreview(key) });
     } catch (error) {
       console.error(error);
+      if (key) removePendingPreview(key);
       setStatus(error.message || "Video link import failed");
     }
   }
 
   async function importVideoPage(projectId, url) {
     return startVideoPageJob(projectId, url);
-    setStatus("Resolving public video page…");
-    /* Legacy blocking poll retained below temporarily for source history.
-    const created = await fetch(`/api/projects/${projectId}/video-jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
-    const job = await created.json().catch(() => ({}));
-    if (!created.ok) throw new Error(job.error || "Video job could not be created");
-    while (true) {
-      await new Promise((resolve) => window.setTimeout(resolve, 900));
-      const response = await fetch(`/api/projects/${projectId}/video-jobs/${encodeURIComponent(job.id)}`, { cache: "no-store" });
-      const status = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(status.error || "Video download status could not be read");
-      if (status.state === "ready") { addVideo(status.result.src, status.result.name, { mimeType: status.result.mimeType, sourceFile: status.result.sourceFile, sourceUrl: status.result.sourceUrl, sourceTitle: status.result.title, sourceExtractor: status.result.extractor, retrievedAt: status.result.retrievedAt }); setStatus(`Video downloaded · ${status.result.name}`); return; }
-      if (status.state === "failed" || status.state === "cancelled") throw new Error(status.error || `Video job ${status.state}`);
-      setStatus(status.state === "resolving" ? "Resolving public video page…" : "Downloading public video…");
-    }
-    */
   }
 
   async function startVideoPageJob(projectId, url) {
     setStatus("Resolving public video page");
-    const created = await fetch(`/api/projects/${projectId}/video-jobs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, highestQuality: state.exportPreferences.highestQualityMedia }),
-    });
-    const job = await created.json().catch(() => ({}));
-    if (!created.ok) throw new Error(job.error || "Video job could not be created");
-    state.videoJobs.set(job.id, job);
-    renderVideoJobs();
-    pollVideoJob(job).catch((error) => {
-      job.state = "failed";
-      job.error = error.message || "Video download status could not be read";
+    const preparingKey = uid("video-preparing");
+    const preparing = createPendingPreview(preparingKey, "Video from link", { label: "Resolving link…" });
+    try {
+      const created = await fetch(`/api/projects/${projectId}/video-jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, highestQuality: state.exportPreferences.highestQualityMedia }),
+      });
+      const job = await created.json().catch(() => ({}));
+      if (!created.ok) throw new Error(job.error || "Video job could not be created");
+      state.pendingPreviews.delete(preparingKey);
+      state.pendingPreviews.set(job.id, preparing);
+      state.videoJobs.set(job.id, job);
       renderVideoJobs();
-      setStatus(job.error);
-    });
+      pollVideoJob(job).catch((error) => {
+        job.state = "failed";
+        job.error = error.message || "Video download status could not be read";
+        removePendingPreview(job.id);
+        renderVideoJobs();
+        setStatus(job.error);
+      });
+    } catch (error) { removePendingPreview(preparingKey); throw error; }
   }
 
   els.workspace.addEventListener("dragover", (event) => {

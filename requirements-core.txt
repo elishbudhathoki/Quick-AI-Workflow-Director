@@ -1,0 +1,6 @@
+# The local app, Canny maps, and video import/export. No model weights are bundled.
+Pillow>=12,<13
+numpy>=2,<3
+opencv-python-headless>=4.10,<6
+yt-dlp>=2026.7,<2027
+imageio-ffmpeg>=0.6,<1

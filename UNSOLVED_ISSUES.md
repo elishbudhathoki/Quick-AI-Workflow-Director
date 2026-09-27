@@ -4,6 +4,8 @@
 
 **Status:** Rebuilt and ready for user validation. Keep open until the user confirms the real interaction and the remaining short/long-clip and export-quality checks pass.
 
+**2026-09-27 verification:** Plain double-click was restored after a template-picker change took over the gesture. Synthetic 3-, 27-, and 90-second clips opened in the browser; the frame picker loaded its player before filmstrip completion and reused thumbnails on reopen. Source-quality exports matched all three fixture dimensions, and a 40.909-second selection stored 40909 ms. User validation on real-world clips remains open.
+
 ### Latest rebuild
 
 - Consolidated opening to one capture-phase delegated double-click path plus the inspector fallback.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ipaddress
+import io
 import json
 import mimetypes
 import os
@@ -23,6 +24,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
@@ -35,6 +37,7 @@ STATIC_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL = "gpt-5.6-terra"
 MAX_BODY_BYTES = 320 * 1024 * 1024
 MAX_VIDEO_BYTES = 240 * 1024 * 1024
+MAX_IMAGE_BYTES = 24 * 1024 * 1024
 MAX_REFERENCES = 30
 
 
@@ -48,6 +51,24 @@ def find_ffmpeg() -> str | None:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except (ImportError, OSError):
         return None
+
+
+def default_data_dir() -> Path:
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AI Canvas"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "AI Canvas"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "ai-canvas"
+
+
+def default_projects_dir() -> Path:
+    configured = os.environ.get("AI_CANVAS_PROJECTS_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    documents = Path.home() / "Documents"
+    if sys.platform == "win32" or documents.is_dir():
+        return documents / "AI Canvas Projects"
+    return default_data_dir() / "projects"
 
 
 PROVIDERS: dict[str, dict[str, Any]] = {
@@ -139,7 +160,7 @@ class JsonCredentialStore:
         return {
             "copyPromptOnExport": bool(preferences.get("copyPromptOnExport", True)),
             "openFolderOnExport": bool(preferences.get("openFolderOnExport", True)),
-            "highestQualityMedia": bool(preferences.get("highestQualityMedia", False)),
+            "highestQualityMedia": True,
             "lastActiveProjectId": str(preferences.get("lastActiveProjectId") or "") or None,
             "openProjectIds": [str(value) for value in preferences.get("openProjectIds", []) if isinstance(value, str)],
         }
@@ -339,15 +360,15 @@ class ProjectRepository:
     def validate_public_url(value: str) -> urllib.parse.ParseResult:
         parsed = urllib.parse.urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("Paste a valid http or https video URL.")
+            raise ValueError("Paste a valid http or https URL.")
         try:
             addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443)}
         except socket.gaierror as error:
-            raise ValueError(f"Video host could not be resolved: {error}") from error
+            raise ValueError(f"Link host could not be resolved: {error}") from error
         for address in addresses:
             ip = ipaddress.ip_address(address)
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-                raise ValueError("Local or private-network video URLs are not allowed.")
+                raise ValueError("Local or private-network URLs are not allowed.")
         return parsed
 
     def import_video_url(self, project_id: str, url: str) -> dict[str, Any]:
@@ -394,6 +415,49 @@ class ProjectRepository:
             "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(filename)}",
             "size": total,
         }
+
+    def import_image_url(self, project_id: str, url: str) -> dict[str, Any]:
+        from PIL import Image, UnidentifiedImageError
+
+        folder = self.folder(project_id)
+        parsed = self.validate_public_url(url)
+        request = urllib.request.Request(url, headers={"User-Agent": "AI Canvas/0.4"})
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, fp, code, msg, headers, newurl):
+                raise ValueError("Use the direct public image URL, without a redirect.")
+
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=45) as response:
+                if int(response.headers.get("Content-Length") or 0) > MAX_IMAGE_BYTES:
+                    raise ValueError("Image exceeds the 24 MB import limit.")
+                data = response.read(MAX_IMAGE_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            raise ValueError(f"Image download failed ({error.code}).") from error
+        except urllib.error.URLError as error:
+            raise ValueError(f"Image download failed: {error.reason}") from error
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError("Image exceeds the 24 MB import limit.")
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                if image.width * image.height > 32_000_000:
+                    raise ValueError("Image exceeds the 32 megapixel limit.")
+                extension = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}.get(image.format)
+                if not extension:
+                    raise ValueError("Use a direct PNG, JPEG, or WebP image URL.")
+                width, height = image.size
+        except (OSError, UnidentifiedImageError) as error:
+            raise ValueError("The URL did not return a readable image.") from error
+        raw_name = Path(urllib.parse.unquote(parsed.path)).stem or "Downloaded image"
+        display_name = self.clean_name(raw_name) + extension
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "-", raw_name).strip("-")[:42] or "image"
+        filename = f"image-{safe_stem}-{secrets.token_hex(4)}{extension}"
+        relative = f"media/{filename}"
+        (folder / relative).write_bytes(data)
+        return {"name": display_name, "sourceFile": relative,
+                "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(filename)}",
+                "width": width, "height": height, "size": len(data)}
 
     def media_file(self, project_id: str, filename: str) -> Path:
         folder = self.folder(project_id)
@@ -445,6 +509,124 @@ class ProjectRepository:
             "src": f"/api/projects/{project_id}/media/{urllib.parse.quote(proxy.name)}",
             "cached": False,
         }
+
+    def video_metadata(self, project_id: str, source_file: str) -> dict[str, Any]:
+        folder = self.folder(project_id)
+        source = (folder / str(source_file)).resolve()
+        media_folder = (folder / "media").resolve()
+        if source.parent != media_folder:
+            raise ValueError("Invalid video source path.")
+        if not source.is_file():
+            raise FileNotFoundError("Source video was not found.")
+        try:
+            import cv2
+        except ImportError:
+            return {"frameRate": None, "frameCount": None}
+        capture = cv2.VideoCapture(str(source))
+        try:
+            fps = float(capture.get(cv2.CAP_PROP_FPS)) if capture.isOpened() else 0
+            count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) if capture.isOpened() else 0
+        finally:
+            capture.release()
+        return {
+            "frameRate": round(fps, 3) if 1 <= fps <= 240 else None,
+            "frameCount": count if count > 0 else None,
+        }
+
+    def export_maps(self, project_id: str, source_name: str, source_asset_id: str, maps: list[dict[str, Any]]) -> str:
+        folder = self.folder(project_id)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output = folder / "exports" / f"maps_{stamp}"
+        suffix = 2
+        while output.exists():
+            output = folder / "exports" / f"maps_{stamp}_{suffix}"
+            suffix += 1
+        output.mkdir(parents=True)
+        stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", Path(source_name).stem).strip("-")[:48] or "reference"
+        records = []
+        for item in maps:
+            kind = item["type"]
+            filename = f"{stem}_{kind}.png"
+            _, data = self.parse_data_url(item["dataUrl"])
+            (output / filename).write_bytes(data)
+            record = {"type": kind, "filename": filename, "width": item["width"], "height": item["height"],
+                      "engine": item.get("engine", "built-in"), "workflowName": item.get("workflowName")}
+            if item.get("rawDataUrl"):
+                raw_name = f"{stem}_{kind}_raw16.png"
+                _, raw_data = self.parse_data_url(item["rawDataUrl"])
+                (output / raw_name).write_bytes(raw_data)
+                record["rawFilename"] = raw_name
+            records.append(record)
+        (output / "manifest.json").write_text(json.dumps({
+            "schemaVersion": 1, "sourceAssetId": source_asset_id, "sourceName": source_name,
+            "createdAt": utc_now(), "maps": records,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(output)
+
+    def map_workflow(self, project_id: str, kind: str) -> dict[str, Any]:
+        if kind not in {"canny", "lineart", "depth", "pose", "softedge", "normal", "scribble", "animal_pose"}:
+            raise ValueError("Unsupported map type.")
+        path = self.folder(project_id) / "map_workflows" / f"{kind}.json"
+        if not path.is_file():
+            raise FileNotFoundError(f"Add a ComfyUI workflow for {kind} first.")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def list_map_workflows(self, project_id: str) -> dict[str, Any]:
+        self.folder(project_id)
+        result = {}
+        for kind in ("canny", "lineart", "depth", "pose", "softedge", "normal", "scribble", "animal_pose"):
+            try:
+                saved = self.map_workflow(project_id, kind)
+                result[kind] = {"name": saved.get("name"), "serverUrl": saved.get("serverUrl"),
+                                "inputNodeId": saved.get("inputNodeId"), "outputNodeId": saved.get("outputNodeId")}
+            except FileNotFoundError:
+                pass
+        return result
+
+    def list_map_exports(self, project_id: str) -> list[dict[str, Any]]:
+        exports = self.folder(project_id) / "exports"
+        batches = []
+        for folder in exports.glob("maps_*"):
+            if not folder.is_dir() or not re.fullmatch(r"maps_[0-9_-]+", folder.name):
+                continue
+            try:
+                manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            batches.append({
+                "name": folder.name,
+                "sourceAssetId": manifest.get("sourceAssetId"),
+                "createdAt": manifest.get("createdAt"),
+                "mapCount": len(manifest.get("maps") or []),
+                "downloadUrl": f"/api/projects/{project_id}/maps/{folder.name}.zip",
+            })
+        return sorted(batches, key=lambda batch: batch["name"], reverse=True)
+
+    def save_map_workflow(self, project_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        from comfy_maps import MAP_TYPES, server_url, validate_workflow
+
+        kind = str(config.get("type") or "")
+        if kind not in MAP_TYPES:
+            raise ValueError("Choose a supported map type.")
+        normalized = {
+            "type": kind,
+            "name": str(config.get("name") or f"{kind} workflow")[:120],
+            "serverUrl": server_url(str(config.get("serverUrl") or "")),
+            "inputNodeId": str(config.get("inputNodeId") or ""),
+            "outputNodeId": str(config.get("outputNodeId") or ""),
+            "workflow": validate_workflow(config.get("workflow"), str(config.get("inputNodeId") or ""),
+                                          str(config.get("outputNodeId") or "")),
+        }
+        folder = self.folder(project_id) / "map_workflows"
+        folder.mkdir(exist_ok=True)
+        path = folder / f"{kind}.json"
+        temporary = path.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(json.dumps(normalized, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {key: normalized[key] for key in ("type", "name", "serverUrl", "inputNodeId", "outputNodeId")}
 
     def export(self, project_id: str, files: list[dict[str, Any]], open_folder: bool = False) -> dict[str, Any]:
         folder = self.folder(project_id)
@@ -1064,6 +1246,35 @@ class VideoJobManager:
 class CanvasRequestHandler(SimpleHTTPRequestHandler):
     server_version = "AICanvasLocal/0.3"
 
+    def allow_local_request(self) -> bool:
+        """Reject DNS rebinding and cross-site writes to the local project API."""
+        host = self.headers.get("Host", "")
+        try:
+            parsed_host = urllib.parse.urlsplit(f"http://{host}")
+            valid_host = parsed_host.hostname in {"127.0.0.1", "localhost", "::1"}
+            valid_port = parsed_host.port == self.server.server_port
+            valid_syntax = not parsed_host.username and not parsed_host.password and not parsed_host.path and not parsed_host.query and not parsed_host.fragment
+        except ValueError:
+            valid_host = valid_port = valid_syntax = False
+        origin = self.headers.get("Origin")
+        valid_origin = True
+        if origin:
+            try:
+                parsed_origin = urllib.parse.urlsplit(origin)
+                valid_origin = (
+                    parsed_origin.scheme == "http"
+                    and parsed_origin.hostname in {"127.0.0.1", "localhost", "::1"}
+                    and parsed_origin.port == self.server.server_port
+                    and not parsed_origin.username and not parsed_origin.password
+                    and not parsed_origin.path and not parsed_origin.query and not parsed_origin.fragment
+                )
+            except ValueError:
+                valid_origin = False
+        if valid_host and valid_port and valid_syntax and valid_origin:
+            return True
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "AI Canvas only accepts requests from its local page."})
+        return False
+
     @property
     def mock_ai(self) -> bool:
         return bool(getattr(self.server, "mock_ai", False))
@@ -1176,6 +1387,8 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         return summaries
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self.allow_local_request():
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path == "/api/health":
@@ -1196,12 +1409,45 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             preferences = self.credential_store.get_preferences() if isinstance(self.credential_store, JsonCredentialStore) else {
                 "copyPromptOnExport": True,
                 "openFolderOnExport": True,
-                "highestQualityMedia": False,
+                "highestQualityMedia": True,
             }
             self.send_json(HTTPStatus.OK, {"preferences": preferences})
             return
         if path == "/api/projects":
             self.send_json(HTTPStatus.OK, {"projects": self.projects.list(), "folder": str(self.projects.root)})
+            return
+        workflow_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/map-workflows", path)
+        if workflow_match:
+            try: self.send_json(HTTPStatus.OK, {"workflows": self.projects.list_map_workflows(workflow_match.group(1))})
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+            return
+        map_list_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/maps", path)
+        if map_list_match:
+            try: self.send_json(HTTPStatus.OK, {"exports": self.projects.list_map_exports(map_list_match.group(1))})
+            except FileNotFoundError as error: self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+            return
+        maps_zip_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/maps/(maps_[0-9_-]+)\.zip", path)
+        if maps_zip_match:
+            try:
+                project_id, batch_name = maps_zip_match.groups()
+                export_folder = self.projects.folder(project_id) / "exports" / batch_name
+                if not export_folder.is_dir():
+                    raise FileNotFoundError("Map export not found.")
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zip_output:
+                    for file in export_folder.iterdir():
+                        if file.is_file() and (file.suffix.lower() == ".png" or file.name == "manifest.json"):
+                            zip_output.write(file, file.name)
+                payload = archive.getvalue()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f'attachment; filename="{batch_name}.zip"')
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "private, no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+            except FileNotFoundError as error:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
             return
         media_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/media/([^/]+)", path)
         if media_match:
@@ -1232,6 +1478,8 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self.allow_local_request():
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         body = self.read_json_body()
@@ -1259,9 +1507,21 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                 preferences = {
                     "copyPromptOnExport": bool(body.get("copyPromptOnExport", True)),
                     "openFolderOnExport": bool(body.get("openFolderOnExport", True)),
-                    "highestQualityMedia": bool(body.get("highestQualityMedia", False)),
+                    "highestQualityMedia": bool(body.get("highestQualityMedia", True)),
                 }
             self.send_json(HTTPStatus.OK, {"preferences": preferences})
+            return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/images/import-url", path)
+        if match:
+            try:
+                result = self.projects.import_image_url(match.group(1), str(body.get("url") or "").strip())
+            except FileNotFoundError as error:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+                return
+            except (OSError, ValueError) as error:
+                self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
+                return
+            self.send_json(HTTPStatus.CREATED, result)
             return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/videos/import-url", path)
         if match:
@@ -1275,6 +1535,74 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json(HTTPStatus.CREATED, result)
             return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/maps", path)
+        if match:
+            try:
+                self.projects.folder(match.group(1))
+                encoded = str(body.get("imageBase64") or "")
+                if len(encoded) > 34 * 1024 * 1024:
+                    raise ValueError("Image is too large for map generation.")
+                source_bytes = base64.b64decode(encoded, validate=True)
+                requested = body.get("types")
+                if not isinstance(requested, list):
+                    raise ValueError("Choose at least one map type.")
+                if body.get("engine") == "comfyui":
+                    from comfy_maps import MAP_TYPES, generate_map
+
+                    if not requested or any(kind not in MAP_TYPES for kind in requested):
+                        raise ValueError("Choose one or more supported map types.")
+                    result = {"maps": [], "errors": {}, "fallbacks": []}
+                    for kind in dict.fromkeys(requested):
+                        try:
+                            config = self.projects.map_workflow(match.group(1), kind)
+                        except FileNotFoundError:
+                            if kind == "animal_pose":
+                                result["errors"][kind] = "Add a ComfyUI AnimalPosePreprocessor workflow for Animal pose first."
+                                continue
+                            from map_processor import generate_maps
+
+                            fallback = generate_maps(source_bytes, [kind])
+                            result["maps"].extend(fallback["maps"])
+                            result["errors"].update(fallback["errors"])
+                            result["fallbacks"].append(kind)
+                            continue
+                        try:
+                            result["maps"].append(generate_map(source_bytes, config))
+                        except Exception as error:
+                            result["errors"][kind] = str(error)[:400] or "ComfyUI map generation failed."
+                else:
+                    from map_processor import generate_maps
+
+                    result = generate_maps(source_bytes, requested)
+                if result["maps"]:
+                    result["exportFolder"] = self.projects.export_maps(
+                        match.group(1), str(body.get("sourceName") or "reference"),
+                        str(body.get("sourceAssetId") or ""), result["maps"]
+                    )
+                    result["downloadUrl"] = (f"/api/projects/{match.group(1)}/maps/"
+                                             f"{Path(result['exportFolder']).name}.zip")
+                    for map_item in result["maps"]:
+                        map_item.pop("rawDataUrl", None)
+            except FileNotFoundError as error:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+                return
+            except (OSError, RuntimeError, ValueError, base64.binascii.Error) as error:
+                self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
+                return
+            self.send_json(HTTPStatus.OK, result)
+            return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/map-workflows", path)
+        if match:
+            try:
+                saved = self.projects.save_map_workflow(match.group(1), body)
+            except FileNotFoundError as error:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+                return
+            except (OSError, ValueError) as error:
+                self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
+                return
+            self.send_json(HTTPStatus.OK, {"workflow": saved})
+            return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/videos/scrub-proxy", path)
         if match:
             try:
@@ -1286,6 +1614,18 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
                 return
             self.send_json(HTTPStatus.CREATED, result)
+            return
+        match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/videos/metadata", path)
+        if match:
+            try:
+                result = self.projects.video_metadata(match.group(1), str(body.get("sourceFile") or ""))
+            except FileNotFoundError as error:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+                return
+            except (OSError, ValueError) as error:
+                self.send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
+                return
+            self.send_json(HTTPStatus.OK, result)
             return
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs", path)
         if match:
@@ -1336,6 +1676,8 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
 
     def do_PUT(self) -> None:  # noqa: N802
+        if not self.allow_local_request():
+            return
         path = urllib.parse.urlparse(self.path).path
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)", path)
         if not match:
@@ -1363,6 +1705,8 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, project)
 
     def do_PATCH(self) -> None:  # noqa: N802
+        if not self.allow_local_request():
+            return
         path = urllib.parse.urlparse(self.path).path
         match = re.fullmatch(r"/api/projects/([a-z0-9-]+)", path)
         if not match:
@@ -1382,6 +1726,8 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, project)
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if not self.allow_local_request():
+            return
         path = urllib.parse.urlparse(self.path).path
         job_match = re.fullmatch(r"/api/projects/([a-z0-9-]+)/video-jobs/(video-job-[a-f0-9]+)", path)
         if job_match:
@@ -1478,9 +1824,7 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def main() -> None:
-    default_settings_file = Path(
-        os.environ.get("LOCALAPPDATA") or (Path.home() / ".ai-canvas")
-    ) / "AI Canvas" / "settings.json"
+    default_settings_file = default_data_dir() / "settings.json"
     parser = argparse.ArgumentParser(description="Run the local AI Canvas prototype server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4173)
@@ -1495,10 +1839,12 @@ def main() -> None:
     parser.add_argument(
         "--projects-dir",
         type=Path,
-        default=Path.home() / "Documents" / "AI Canvas Projects",
+        default=default_projects_dir(),
         help="Root folder containing one directory per project.",
     )
     args = parser.parse_args()
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        parser.error("The desktop source server only binds to loopback. Use 127.0.0.1 or localhost.")
     handler = partial(CanvasRequestHandler, directory=str(STATIC_DIR))
     server = ExclusiveThreadingHTTPServer((args.host, args.port), handler)
     server.mock_ai = args.mock_ai  # type: ignore[attr-defined]

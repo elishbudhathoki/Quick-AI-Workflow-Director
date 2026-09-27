@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI Canvas Interaction Spike</title>
-    <link rel="stylesheet" href="./styles.css?v=20260814-frame-export-feedback" />
+    <title>AI Canvas</title>
+    <link rel="stylesheet" href="./styles.css?v=20260928-desktop-release-1" />
   </head>
   <body>
     <main class="app-shell">
@@ -15,7 +15,7 @@
           </span>
           <div class="brand-copy">
             <strong>AI Canvas</strong>
-            <small>Local workspace</small>
+            <small>Creative workspace</small>
           </div>
         </div>
 
@@ -72,7 +72,7 @@
         <section id="emptyState" class="empty-state">
           <div class="empty-icon">⌘V</div>
           <h1>Paste a reference</h1>
-          <p>Paste an image or video. Press <kbd>R</kbd> to annotate a region or an entire video.</p>
+          <p>Paste an image, video, or direct media link. Double-click an image for quick maps.</p>
           <button id="emptyImportButton" class="button secondary">Choose media</button>
         </section>
 
@@ -92,16 +92,17 @@
         </div>
 
         <div id="promptTab" class="panel-content">
-          <p class="prototype-notice">References stay local until you press <strong>Analyze &amp; Draft</strong>. Image crops are sent directly; videos are represented by a small contact sheet sampled across the full clip. The model receives each compact filename and raw instruction.</p>
+          <div class="prompt-intro"><span class="eyebrow">COMPOSE</span><h2>Make the idea clear.</h2><p>Shape a prompt from your visual references.</p></div>
+          <p class="prototype-notice"><span aria-hidden="true">◉</span> References stay on this device until you analyze.</p>
 
           <label class="field">
-            <span>What are you creating?</span>
-            <textarea id="objectiveInput" rows="4" placeholder="Create a cinematic fashion portrait…"></textarea>
+            <span>Your idea</span>
+            <textarea id="objectiveInput" rows="4" placeholder="Describe what you want to create…"></textarea>
           </label>
 
-          <div class="field prompt-template-field">
+          <details class="prompt-advanced"><summary>Art direction &amp; format <span>Optional</span></summary><div class="field prompt-template-field">
             <div class="field-heading-row">
-              <span>Prompt drafting instructions</span>
+              <span>Drafting instructions</span>
               <div>
                 <button id="saveInstructionTemplateButton" class="text-button" type="button">Save template</button>
                 <button id="importInstructionTemplateButton" class="text-button" type="button">Import</button>
@@ -110,7 +111,7 @@
             <textarea id="formatInput" rows="4" placeholder="Use separate Character, Wardrobe, Environment, and Lighting sections."></textarea>
             <input id="instructionTemplateFileInput" type="file" accept=".md,.txt,text/markdown,text/plain" multiple hidden />
             <div id="instructionTemplateShelf" class="instruction-template-shelf" aria-label="Prompt instruction templates"></div>
-          </div>
+          </div></details>
 
           <div class="section-heading">
             <span>References</span>
@@ -200,13 +201,8 @@
               <small>Shared across projects</small>
             </summary>
             <div class="export-settings-body">
-              <label class="setting-toggle">
-                <input id="highestQualityMediaInput" type="checkbox" />
-                <span>
-                  <strong>Highest available quality</strong>
-                  <small>Keep source-resolution crops and video frames; use lossless PNG frames and request the best available public video streams. Larger files and slower exports are expected.</small>
-                </span>
-              </label>
+              <input id="highestQualityMediaInput" type="checkbox" checked hidden />
+              <div class="export-quality-note"><strong>Source quality</strong><small>Images and video frames export at their original resolution. Frame images use lossless PNG.</small></div>
               <label class="setting-toggle">
                 <input id="copyPromptOnExportInput" type="checkbox" checked />
                 <span>
@@ -227,7 +223,7 @@
 
         <div id="selectionTab" class="panel-content" hidden>
           <div id="selectionEmpty" class="selection-empty">
-            <p>Select an image or annotation to inspect it.</p>
+            <span class="selection-empty-icon" aria-hidden="true">◇</span><strong>Nothing selected</strong><p>Choose a reference on the canvas to edit or create maps.</p>
           </div>
           <div id="selectionDetails" hidden></div>
         </div>
@@ -287,15 +283,20 @@
               <output class="viewer-export-feedback" data-field="viewer-export-status" aria-live="polite"></output>
             </div>
           </div>
-          <div class="video-frame-viewer-timeline-tools" aria-label="Timeline zoom">
-            <span data-field="viewer-range">Entire video</span>
-            <span class="viewer-zoom-hint">Scroll to scrub · pinch or Ctrl + wheel to zoom</span>
+          <div class="video-overview" aria-label="Whole video navigation">
+            <span>0:00</span>
+            <input data-field="viewer-overview" type="range" min="0" max="1" step="0.001" value="0" aria-label="Jump through whole video" />
+            <span data-field="viewer-overview-end">0:00</span>
+          </div>
+          <div class="video-frame-viewer-timeline-tools">
+            <span data-field="viewer-range">Frame detail</span>
+            <span class="viewer-zoom-hint">Drag the filmstrip for precise frames</span>
           </div>
           <div class="video-filmstrip-shell" aria-label="Video frame filmstrip">
             <div class="video-filmstrip-playhead" aria-hidden="true"></div>
             <div data-field="viewer-filmstrip" class="video-filmstrip"></div>
           </div>
-          <small>Drag or scroll to scrub · use ← → for exact frame steps · export always uses the full-quality local source</small>
+          <small>Overview jumps anywhere · filmstrip scrubs frame by frame · ← → steps one frame · export uses the original video</small>
         </div>
       </section>
 
@@ -303,7 +304,7 @@
         <div class="canvas-template-card">
           <header><div><strong>Canvas templates</strong><small>Reusable references with their annotations</small></div><button class="icon-button" data-action="close-template-picker" aria-label="Close templates">×</button></header>
           <div data-field="template-list" class="canvas-template-list"></div>
-          <small>Double-click the canvas to open templates · Ctrl + double-click to import</small>
+          <small>Double-click empty canvas to open templates · Ctrl + double-click to import</small>
         </div>
       </section>
 
@@ -315,6 +316,6 @@
       </footer>
     </main>
 
-    <script src="./app.js?v=20260815-template-previews" defer></script>
+    <script src="./app.js?v=20260928-desktop-release-1" defer></script>
   </body>
 </html>

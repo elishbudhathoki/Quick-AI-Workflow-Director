@@ -1,6 +1,27 @@
 # AI Canvas TODO
 
+## Desktop source release
+
+- [x] Add Apache-2.0 source license, root setup guide, storage notes, and third-party model notices.
+- [x] Add cross-platform `setup.py` and `start.py`; keep user projects and settings outside the clone.
+- [x] Verify a new Windows virtual environment installs core and learned-map packages, runs the server/Canny smoke check, and generates Human pose.
+- [x] Add local Host/Origin checks and stop the Windows helper from killing unrelated port listeners.
+- [ ] Run the GitHub Actions Windows/macOS/Linux clean-clone matrix after the branch is pushed; fix any platform failures.
+- [ ] Test the browser UI and optional maps on a real macOS and Linux desktop, including GPU/CPU fallbacks.
+- [ ] Publish a public release tag after cross-platform checks and repository visibility review.
+
 ## SOL handoff: local video frame picker
+
+### 2026-09-27 implementation update
+
+- Fixed Human pose's missing `matplotlib` dependency and confirmed a 736×1103 portrait now produces a 736×1103 pose map.
+- Map generation placeholders and finished map cards now use the selected source card's canvas dimensions and position. The placeholder shows a soft preview of the source while processing.
+- Added a whole-video range navigator above a local frame-detail filmstrip. The picker reads the source frame rate from the local server, steps at that rate, and stops assigning a live frame to a thumbnail with a different timestamp.
+- Browser-checked the user's 24 fps, 248-frame clip: jumping to 5 seconds rebuilt the detailed strip around 5 seconds, and Next frame moved to 5.041 seconds. The server metadata endpoint reported 24 fps and 248 frames.
+- Restored plain video-card double-click while keeping Ctrl + double-click for import and empty-canvas double-click for templates. A capture-phase second-pointer check survives card re-rendering during selection.
+- Source-quality image export is now the default. Extracted frames store the actual decoded timestamp, and crop manifest records include source-video ID/timestamp and derived-map provenance.
+- Browser-checked synthetic 3-second landscape, 27-second portrait, and 90-second landscape clips. The picker opened before thumbnails filled; reopen reused cached thumbnails. Exported frame dimensions matched the three sources (640×360, 360×640, 320×180). A 90-second clip selected at 40.909 seconds produced sourceTimestampMs 40909.
+- Still validate with user-owned real-world clips, especially unusual codecs, audio tracks, and long 4K media. Synthetic checks do not settle the user-reported interaction concern.
 
 Priority: high. The current implementation is not acceptable as a user experience. Do not spend time polishing this surface until its interaction and performance are reliable.
 
@@ -27,20 +48,21 @@ Create a focused reference-frame selector, not a full video editor:
 - [x] Plain double-click reliably opens the picker on a video card, even after drag/select interactions and after a browser refresh.
 - [x] Inspector fallback opens the same picker every time.
 - [x] The modal is visibly open and focused immediately; video controls can play/pause without waiting for filmstrip work.
-- [x] A current-frame visual appears in the strip immediately, then the rest of the strip progressively fills without blocking input.
+- [x] The player shows the current frame immediately; the detailed strip progressively fills with thumbnails captured at their labelled timestamps without blocking input.
 - [x] Timeline remains responsive while thumbnails decode: click, drag, wheel/trackpad, keyboard left/right, and close all work.
 - [x] Automatic wheel/pinch zoom changes the bounded sampling window around the fixed playhead without mode tabs.
 - [x] Moving quickly across a clip cancels obsolete thumbnail generations instead of queuing them indefinitely.
 - [x] Reopening a video uses cached preview data where valid and feels substantially faster than first open.
-- [ ] Exported image dimensions match the local video source at the active quality setting and are timestamp-accurate.
+- [x] Synthetic source-quality exports matched source dimensions and recorded the actual decoded timestamp; real-world validation remains open below.
 - [x] Confirm a local scrub proxy is generated and used when FFmpeg is available; original-source export remains on the retained source file.
-- [ ] Test at least a short clip, a typical 15–60 second Short, and a longer clip; record first-open and reopen behavior.
+- [x] Tested synthetic short, 27-second portrait, and 90-second clips; first open was immediate and reopen reused filmstrip thumbnails.
+- [ ] Confirm the same behavior on user-owned clips with real codecs and 4K media.
 
 ### Latest verification
 
 - Tested against a real local 2160×3840 WebM of approximately 65 MB and 27 seconds.
 - The modal opens synchronously on the second click; the local video reached ready state 4 and displayed the current frame without waiting for the filmstrip.
-- One immediate filmstrip thumbnail was visible during the first 120 ms check; remaining previews continued progressively.
+- The current player frame is visible immediately; detailed thumbnails decode progressively from their labelled timestamps.
 - The 65 MB source produced a cached 7.2 MB project-local scrub proxy. The picker loaded that proxy while the export path continued to reference the original source.
 - Rapid jumps across five non-adjacent thumbnails resolved to the requested timestamps every time. Smooth auto-scroll was removed because it could issue a competing seek after a click.
 - Frame-step moved from 0 to 0.033 seconds; automatic timeline zoom produced a bounded local window without changing modes.
@@ -80,6 +102,10 @@ Create a focused reference-frame selector, not a full video editor:
 
 ## Deferred
 
+- [ ] Add semantic segmentation maps for scene regions and object categories.
+- [ ] Add tile/detail, straight-line (MLSD), face-landmark, and inpainting-mask map workflows; evaluate which deserve fast built-in processors versus ComfyUI presets.
+- [ ] Validate Animal pose with a live ComfyUI AP-10K workflow and representative animal images; consider a built-in animal pose model if the workflow path proves cumbersome.
+- [ ] When full text-to-image generation is added, connect its job lifecycle to the reusable canvas loading tile so the final image replaces the placeholder in place.
 - [ ] Metadata confirmation before large public-page downloads.
 - [ ] Scene-change keyframe extraction.
 - [ ] Contact-sheet generation controls and extraction progress/cancellation.
