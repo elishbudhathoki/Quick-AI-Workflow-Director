@@ -34,7 +34,7 @@ jobs:
       - name: Set up clean clone
         run: python setup.py
       - name: Unit tests
-        run: python -m unittest discover -s tests
+        run: .venv/${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }} -m unittest discover -s tests
       - name: Source syntax
         run: |
           python -m py_compile setup.py start.py prototype/server.py prototype/map_processor.py prototype/comfy_maps.py
