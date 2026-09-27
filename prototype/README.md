@@ -1,18 +1,19 @@
 # AI Canvas interaction spike
 
-This dependency-free browser prototype validates the highest-risk interaction before the production stack is selected
+This local browser prototype validates the canvas, export, and reference-map workflows before a production stack is selected.
 
 ## Run locally
 
-From the workspace root, run the local application server:
+From a fresh clone, set up the isolated environment, then run the local application server:
 
-```powershell
-py -3 prototype\server.py
+```sh
+python setup.py
+python start.py
 ```
 
-Then open `http://127.0.0.1:4173`.
+The launcher opens `http://127.0.0.1:4173`. It supports Windows, macOS, and Linux desktops.
 
-For Windows convenience, use `Restart-AI-CanvasServer.cmd` from the workspace root to stop the server listening on port 4173 and start the normal provider-enabled app. Use `Stop-AI-CanvasServer.cmd` to close it without restarting.
+On Windows, `Restart-AI-CanvasServer.cmd` is a legacy start shortcut. It no longer kills whatever is listening on port 4173. Stop the running app with Ctrl+C in its server terminal before starting another copy.
 
 On startup, the app scans the managed projects root and automatically loads the most recently updated project. If no managed project exists, it creates and loads an `Untitled project` folder. Browser-local recovery is used only when the project service is unavailable or when seeding that first managed project. Pasted and imported images autosave into the active project's `media/` directory.
 
@@ -20,8 +21,8 @@ Do not use `python -m http.server` for this app. That command serves the interfa
 
 For a full end-to-end test that never contacts an AI provider, use:
 
-```powershell
-py -3 prototype\server.py --mock-ai
+```sh
+python start.py --mock-ai
 ```
 
 For image-aware drafting, expand **AI settings**, choose OpenAI or Google Gemini, paste that provider's key, and press **Save & connect**. Each provider keeps its own key in the local AI Canvas app settings file under `%LOCALAPPDATA%\AI Canvas\settings.json`. This file is outside all project folders and is never included in project saves or exports. Environment variables remain supported as an optional fallback.
@@ -50,14 +51,33 @@ The in-progress video phase supports local video import, direct public video-fil
 
 Video job records are saved in each project folder. If the server restarts while a download is active, AI Canvas restores the job, tells `yt-dlp` to continue from its existing partial file where the source supports it, and restores the job card when that project is reopened.
 
-In **Settings → Export settings**, enable **Highest available quality** to keep image crops at their source resolution, capture video frames as full-resolution lossless PNG files, and ask `yt-dlp` for the best available public video and audio streams. It can use substantially more memory, disk space, and time; public-page downloads still keep the 240 MB local safety limit.
+Exports keep image crops at source resolution and video frames as full-resolution lossless PNG files. Public video downloads request the best available streams and retain the 240 MB local safety limit.
 
-## Deliberate limitations
+## Reference maps
+
+Select an image or crop, choose Canny, Outline, Depth, Human pose, Soft edge, Normal, or Scribble, then press **Generate & export maps**. Animal pose is available with a ComfyUI workflow. Each successful map is a PNG in a timestamped `exports/maps_*` folder and an image asset on the canvas. **Download maps ZIP** downloads the batch; selecting an individual map offers **Download image**. **Add my map image** attaches an existing PNG, JPEG, or WebP map to the selected reference, with its map type and source recorded in the project.
+
+Double-click an image on the canvas to open the circular quick-map menu. Existing maps show their actual thumbnails and open on click; a missing map starts generation. A temporary preview tile occupies its canvas position while generation runs, then the finished map appears there. Pasting a direct PNG, JPEG, or WebP link downloads the image into the current project with the same loading tile. Pasted video links show the loading tile too; public video-page downloads display their measured percent when the source reports a total.
+
+Built-in Canny uses full-resolution OpenCV gradients and Canny edge detection. Outline uses `controlnet-aux` Lineart, depth uses the Apache-licensed Depth Anything V2 Small model, Human pose uses OpenPose body, hands, and face, Soft edge and Scribble use HED, and Normal uses NormalBae. The built-in learned models cache their downloaded weights and use bounded inference sizes; generated built-in PNGs retain source dimensions. Depth batches also include a 16-bit grayscale depth PNG for further editing. Images are processed locally, without a paid model API.
+
+To use your own map model or preprocessor, select **My ComfyUI models** in Reference maps. Run ComfyUI locally, enter its address (normally `http://127.0.0.1:8188`), and choose a workflow exported from ComfyUI in **API format**. The workflow needs a `LoadImage` input and a `SaveImage` or `PreviewImage` output. Select their nodes and save the workflow for any map type. For Animal pose, use the [ControlNet Auxiliary Preprocessors](https://github.com/Fannovel16/comfyui_controlnet_aux) `AnimalPosePreprocessor` with an AP-10K pose estimator. AI Canvas saves each workflow inside that project, uploads the chosen reference to local ComfyUI, queues the workflow, and imports its output map. The model, preprocessor, and settings come from the workflow, so install and configure them in ComfyUI. ComfyUI's [self-hosted API routes](https://docs.comfy.org/development/comfyui-server/comms_routes) document the local interface.
+
+Install the optional learned map dependencies in the project virtual environment:
+
+```sh
+python setup.py --maps
+```
+
+Human pose reports when no person is detected. Animal pose requires ComfyUI and is unavailable in the built-in engine. Model maps may take longer on first use, especially on a CPU. A ComfyUI workflow's output keeps its own pixel dimensions, which may differ from the source. The export setting uses source quality by default: crops and video frames keep source dimensions and frame images use PNG.
+
+## Remaining work
 
 - Live OpenAI and Gemini requests require the user's own provider keys and were not executed during automated testing.
 - No production canvas framework or desktop wrapper.
 - No groups, notes, or context-set inclusion controls yet.
-- Some public sources require FFmpeg to merge their audio and video streams. AI Canvas reports that prerequisite rather than installing a binary automatically.
+- Destination delivery, scene-change frame extraction, and further map types such as semantic segmentation remain planned.
+- Setup installs an FFmpeg binary through `imageio-ffmpeg`; unusual public sources can still require source-specific support.
 - The Phase 1 prototype intentionally uses a readable local settings file for keys rather than an OS credential vault.
 
 The current slice validates the complete fast annotation/editing loop, recoverable deletion, command history, coordinate correctness, crop regeneration, editable provider drafting, timestamped export, local project restoration, and the initial video persistence/export foundation.

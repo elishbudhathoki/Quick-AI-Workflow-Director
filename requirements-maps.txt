@@ -1,0 +1,5 @@
+# Optional learned map processors. Install requirements-core.txt first.
+# Model weights download to the user's cache on first use, not into this repo.
+controlnet-aux==0.0.10
+transformers>=5.17,<6
+matplotlib>=3.9,<4
