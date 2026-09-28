@@ -1,8 +1,8 @@
 """Local AI Canvas development server.
 
 Serves the dependency-free prototype and provides a same-origin drafting API.
-API keys are read from environment variables or a local app settings file. The
-settings file lives outside project folders and is never exported with a project.
+API keys are read from environment variables or the operating system credential
+store. Preferences live outside project folders and are never exported.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from typing import Any
 
 
 STATIC_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL = "gpt-5.6-terra"
+DEFAULT_MODEL = "gemini-3.6-flash"
 MAX_BODY_BYTES = 320 * 1024 * 1024
 MAX_VIDEO_BYTES = 240 * 1024 * 1024
 MAX_IMAGE_BYTES = 24 * 1024 * 1024
@@ -72,6 +72,15 @@ def default_projects_dir() -> Path:
 
 
 PROVIDERS: dict[str, dict[str, Any]] = {
+    "gemini": {
+        "id": "gemini", "name": "Google Gemini", "environmentVariable": "GEMINI_API_KEY",
+        "defaultModel": "gemini-3.6-flash",
+        "models": [
+            {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash", "note": "Balanced"},
+            {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "note": "Quality"},
+            {"id": "gemini-3.5-flash-lite", "name": "Gemini 3.5 Flash-Lite", "note": "Economical"},
+        ],
+    },
     "openai": {
         "id": "openai",
         "name": "OpenAI",
@@ -83,18 +92,56 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             {"id": "gpt-5.6-luna", "name": "GPT-5.6 Luna", "note": "Economical"},
         ],
     },
-    "gemini": {
-        "id": "gemini",
-        "name": "Google Gemini",
-        "environmentVariable": "GEMINI_API_KEY",
-        "defaultModel": "gemini-3.6-flash",
+    "groq": {
+        "id": "groq", "name": "Groq", "environmentVariable": "GROQ_API_KEY",
+        "defaultModel": "qwen/qwen3.6-27b",
+        "models": [{"id": "qwen/qwen3.6-27b", "name": "Qwen 3.6 27B", "note": "Fast vision"}],
+        "apiBase": "https://api.groq.com/openai/v1",
+    },
+    "openrouter": {
+        "id": "openrouter", "name": "OpenRouter", "environmentVariable": "OPENROUTER_API_KEY",
+        "defaultModel": "google/gemini-3.8-flash",
         "models": [
-            {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash", "note": "Balanced"},
-            {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "note": "Quality"},
-            {"id": "gemini-3.5-flash-lite", "name": "Gemini 3.5 Flash-Lite", "note": "Economical"},
+            {"id": "google/gemini-3.8-flash", "name": "Gemini 3.8 Flash", "note": "Vision"},
+            {"id": "openai/gpt-5.6-luna", "name": "GPT-5.6 Luna", "note": "Vision"},
         ],
+        "apiBase": "https://openrouter.ai/api/v1",
+    },
+    "anthropic": {
+        "id": "anthropic", "name": "Anthropic Claude", "environmentVariable": "ANTHROPIC_API_KEY",
+        "defaultModel": "claude-sonnet-5",
+        "models": [{"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "note": "Vision"}],
+    },
+    "xai": {
+        "id": "xai", "name": "xAI Grok", "environmentVariable": "XAI_API_KEY",
+        "defaultModel": "grok-4.7",
+        "models": [{"id": "grok-4.7", "name": "Grok 4.7", "note": "Vision"}],
+        "apiBase": "https://api.x.ai/v1",
+    },
+    "mistral": {
+        "id": "mistral", "name": "Mistral", "environmentVariable": "MISTRAL_API_KEY",
+        "defaultModel": "mistral-small-latest",
+        "models": [{"id": "mistral-small-latest", "name": "Mistral Small", "note": "Vision"}],
+        "apiBase": "https://api.mistral.ai/v1",
+    },
+    "custom": {
+        "id": "custom", "name": "Custom API", "environmentVariable": "AI_CANVAS_CUSTOM_API_KEY",
+        "defaultModel": "vision-model",
+        "models": [{"id": "vision-model", "name": "Enter model ID below", "note": ""}],
+        "apiBase": "http://127.0.0.1:1234/v1",
     },
 }
+
+
+def validate_custom_api_base(value: str) -> str:
+    parsed = urllib.parse.urlparse(value.strip())
+    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Enter an API base URL without credentials, query, or fragment.")
+    if parsed.scheme == "https":
+        return value.rstrip("/")
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return value.rstrip("/")
+    raise ValueError("Custom API URLs must use HTTPS, or HTTP on this device only.")
 
 
 def utc_now() -> str:
@@ -116,7 +163,7 @@ class MemoryCredentialStore:
 
 
 class JsonCredentialStore:
-    """Simple app-level provider settings stored outside all project folders."""
+    """JSON preferences with provider secrets held by the OS credential store."""
 
     def __init__(self, settings_file: Path) -> None:
         self.path = settings_file.resolve()
@@ -141,19 +188,41 @@ class JsonCredentialStore:
         temporary.replace(self.path)
 
     def get(self, provider_id: str) -> str | None:
-        provider = self.read().get("providers", {}).get(provider_id, {})
-        return str(provider.get("apiKey") or "").strip() or None
+        try:
+            import keyring
+            secret = keyring.get_password("AI Canvas", provider_id)
+            legacy = self.read().get("providers", {}).get(provider_id, {})
+            if isinstance(legacy, dict) and legacy.get("apiKey"):
+                if not secret:
+                    secret = str(legacy["apiKey"])
+                    keyring.set_password("AI Canvas", provider_id, secret)
+                data = self.read()
+                data["providers"].pop(provider_id, None)
+                self.write(data)
+            return secret or None
+        except Exception as error:
+            raise OSError(f"Device credential store unavailable: {error}") from error
 
     def set(self, provider_id: str, secret: str) -> None:
-        data = self.read()
-        providers = data.setdefault("providers", {})
-        providers[provider_id] = {"apiKey": secret, "updatedAt": utc_now()}
-        self.write(data)
+        try:
+            import keyring
+            keyring.set_password("AI Canvas", provider_id, secret)
+            data = self.read()
+            data.setdefault("providers", {}).pop(provider_id, None)
+            self.write(data)
+        except Exception as error:
+            raise OSError(f"Could not save key in the device credential store: {error}") from error
 
     def delete(self, provider_id: str) -> None:
-        data = self.read()
-        data.setdefault("providers", {}).pop(provider_id, None)
-        self.write(data)
+        try:
+            import keyring
+            if keyring.get_password("AI Canvas", provider_id):
+                keyring.delete_password("AI Canvas", provider_id)
+            data = self.read()
+            data.setdefault("providers", {}).pop(provider_id, None)
+            self.write(data)
+        except Exception as error:
+            raise OSError(f"Could not remove key from the device credential store: {error}") from error
 
     def get_preferences(self) -> dict[str, Any]:
         preferences = self.read().get("preferences", {})
@@ -162,6 +231,8 @@ class JsonCredentialStore:
             "openFolderOnExport": bool(preferences.get("openFolderOnExport", True)),
             "highestQualityMedia": True,
             "lastActiveProjectId": str(preferences.get("lastActiveProjectId") or "") or None,
+            "providerId": str(preferences.get("providerId") or "gemini"),
+            "customApiBase": str(preferences.get("customApiBase") or PROVIDERS["custom"]["apiBase"]),
             "openProjectIds": [str(value) for value in preferences.get("openProjectIds", []) if isinstance(value, str)],
         }
 
@@ -174,6 +245,13 @@ class JsonCredentialStore:
         if "lastActiveProjectId" in preferences:
             value = preferences.get("lastActiveProjectId")
             current["lastActiveProjectId"] = str(value) if value else None
+        if "providerId" in preferences:
+            provider_id = str(preferences["providerId"])
+            if provider_id not in PROVIDERS:
+                raise ValueError("Unsupported provider.")
+            current["providerId"] = provider_id
+        if "customApiBase" in preferences:
+            current["customApiBase"] = validate_custom_api_base(str(preferences["customApiBase"]))
         if "openProjectIds" in preferences:
             values = preferences.get("openProjectIds")
             if not isinstance(values, list):
@@ -912,6 +990,101 @@ def call_openai(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
     return parsed
 
 
+def call_openai_compatible(payload: dict[str, Any], api_key: str, provider_id: str, api_base: str | None = None) -> dict[str, Any]:
+    provider = PROVIDERS[provider_id]
+    content: list[dict[str, Any]] = [{
+        "type": "text",
+        "text": (
+            f"CREATIVE OBJECTIVE\n{str(payload.get('objective') or '[No objective supplied]')}\n\n"
+            f"DRAFTING FORMAT INSTRUCTIONS\n{str(payload.get('draftingInstructions') or '[Use a clear production-ready structure]')}\n\n"
+            "REFERENCE CROPS\nEach metadata block is followed by its matching image crop. Return JSON only."
+        ),
+    }]
+    for reference in payload["references"]:
+        content.extend((
+            {"type": "text", "text": f"Filename: {reference['filename']}\nUser instruction: {reference['instruction']}"},
+            {"type": "image_url", "image_url": {"url": reference["imageDataUrl"]}},
+        ))
+    request = urllib.request.Request(
+        str(api_base or provider["apiBase"]) + "/chat/completions",
+        data=json_bytes({
+            "model": str(payload.get("model") or provider["defaultModel"]),
+            "messages": [
+                {"role": "system", "content": SYSTEM_INSTRUCTIONS + "\nReturn a JSON object matching this schema: " + json.dumps(OUTPUT_SCHEMA)},
+                {"role": "user", "content": content},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 6000,
+        }),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        try:
+            detail = json.loads(error.read().decode("utf-8"))
+            message = detail.get("error", {}).get("message") or str(error)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            message = str(error)
+        raise RuntimeError(message) from error
+    except urllib.error.URLError as error:
+        raise provider_network_error(str(provider["name"]), error) from error
+    output = raw["choices"][0]["message"]["content"]
+    if isinstance(output, list):
+        output = "".join(str(part.get("text") or "") for part in output if isinstance(part, dict))
+    parsed = json.loads(str(output))
+    parsed["model"] = raw.get("model") or payload.get("model") or provider["defaultModel"]
+    parsed["responseId"] = raw.get("id")
+    parsed["usage"] = raw.get("usage")
+    return parsed
+
+
+def call_anthropic(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [{
+        "type": "text",
+        "text": (
+            f"CREATIVE OBJECTIVE\n{str(payload.get('objective') or '[No objective supplied]')}\n\n"
+            f"DRAFTING FORMAT INSTRUCTIONS\n{str(payload.get('draftingInstructions') or '[Use a clear production-ready structure]')}\n\n"
+            "REFERENCE CROPS\nEach metadata block is followed by its matching image crop. "
+            "Return only JSON matching this schema: " + json.dumps(OUTPUT_SCHEMA)
+        ),
+    }]
+    for reference in payload["references"]:
+        mime_type, encoded = ProjectRepository.parse_data_url(str(reference["imageDataUrl"]))
+        content.extend((
+            {"type": "text", "text": f"Filename: {reference['filename']}\nUser instruction: {reference['instruction']}"},
+            {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": base64.b64encode(encoded).decode("ascii")}},
+        ))
+    request = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json_bytes({"model": str(payload.get("model") or PROVIDERS["anthropic"]["defaultModel"]),
+                         "max_tokens": 6000, "system": SYSTEM_INSTRUCTIONS,
+                         "messages": [{"role": "user", "content": content}]}),
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        try:
+            detail = json.loads(error.read().decode("utf-8"))
+            message = detail.get("error", {}).get("message") or str(error)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            message = str(error)
+        raise RuntimeError(message) from error
+    except urllib.error.URLError as error:
+        raise provider_network_error("Anthropic Claude", error) from error
+    output = "".join(part.get("text", "") for part in raw.get("content", []) if part.get("type") == "text")
+    parsed = json.loads(output)
+    parsed["model"] = raw.get("model") or payload.get("model") or PROVIDERS["anthropic"]["defaultModel"]
+    parsed["responseId"] = raw.get("id")
+    parsed["usage"] = raw.get("usage")
+    return parsed
+
+
 def build_gemini_request(payload: dict[str, Any]) -> dict[str, Any]:
     objective = str(payload.get("objective", "")).strip()
     drafting_instructions = str(payload.get("draftingInstructions", "")).strip()
@@ -1017,7 +1190,7 @@ def call_gemini(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
     return parsed
 
 
-def validate_provider_credential(provider_id: str, api_key: str) -> None:
+def validate_provider_credential(provider_id: str, api_key: str, api_base: str | None = None) -> None:
     if provider_id == "openai":
         request = urllib.request.Request(
             "https://api.openai.com/v1/models",
@@ -1027,6 +1200,16 @@ def validate_provider_credential(provider_id: str, api_key: str) -> None:
         request = urllib.request.Request(
             "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
             headers={"x-goog-api-key": api_key},
+        )
+    elif provider_id == "anthropic":
+        request = urllib.request.Request(
+            "https://api.anthropic.com/v1/models",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        )
+    elif provider_id in {"groq", "openrouter", "xai", "mistral", "custom"}:
+        request = urllib.request.Request(
+            str(api_base or PROVIDERS[provider_id]["apiBase"]) + "/models",
+            headers={"Authorization": f"Bearer {api_key}"},
         )
     else:
         raise ValueError("Unsupported provider.")
@@ -1368,7 +1551,11 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
     def provider_key(self, provider_id: str, inline_key: str = "") -> str:
         provider = PROVIDERS[provider_id]
         environment_key = os.environ.get(str(provider["environmentVariable"]), "")
-        return str(inline_key or environment_key or self.credential_store.get(provider_id) or "").strip()
+        try:
+            saved_key = self.credential_store.get(provider_id)
+        except OSError:
+            saved_key = None
+        return str(inline_key or environment_key or saved_key or "").strip()
 
     def provider_summaries(self) -> list[dict[str, Any]]:
         summaries = []
@@ -1381,7 +1568,7 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                     "defaultModel": provider["defaultModel"],
                     "models": provider["models"],
                     "configured": configured,
-                    "credentialStorage": "temporary" if isinstance(self.credential_store, MemoryCredentialStore) else "settings-file",
+                    "credentialStorage": "temporary" if isinstance(self.credential_store, MemoryCredentialStore) else "device-keychain",
                 }
             )
         return summaries
@@ -1766,9 +1953,14 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Enter a valid API key."})
             return
         try:
+            custom_base = None
+            if provider_id == "custom":
+                custom_base = validate_custom_api_base(str(body.get("apiBase") or PROVIDERS["custom"]["apiBase"]))
             if not self.mock_ai:
-                validate_provider_credential(provider_id, api_key)
+                validate_provider_credential(provider_id, api_key, custom_base)
             self.credential_store.set(provider_id, api_key)
+            if custom_base and isinstance(self.credential_store, JsonCredentialStore):
+                self.credential_store.set_preferences({"customApiBase": custom_base})
         except (OSError, RuntimeError, ValueError) as error:
             self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
             return
@@ -1779,7 +1971,7 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
                 "provider": provider_id,
                 "configured": True,
                 "validated": not self.mock_ai,
-                "storage": "temporary" if isinstance(self.credential_store, MemoryCredentialStore) else "settings-file",
+                "storage": "temporary" if isinstance(self.credential_store, MemoryCredentialStore) else "device-keychain",
             },
         )
 
@@ -1789,7 +1981,7 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": validation_error})
             return
         assert payload is not None
-        provider_id = str(payload.get("provider") or "openai")
+        provider_id = str(payload.get("provider") or "gemini")
         if provider_id not in PROVIDERS:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Unsupported drafting provider."})
             return
@@ -1806,7 +1998,13 @@ class CanvasRequestHandler(SimpleHTTPRequestHandler):
             )
             return
         try:
-            result = call_openai(payload, api_key) if provider_id == "openai" else call_gemini(payload, api_key)
+            custom_base = None
+            if provider_id == "custom" and isinstance(self.credential_store, JsonCredentialStore):
+                custom_base = validate_custom_api_base(self.credential_store.get_preferences()["customApiBase"])
+            result = (call_openai(payload, api_key) if provider_id == "openai"
+                      else call_gemini(payload, api_key) if provider_id == "gemini"
+                      else call_anthropic(payload, api_key) if provider_id == "anthropic"
+                      else call_openai_compatible(payload, api_key, provider_id, custom_base))
             result["provider"] = provider_id
         except (RuntimeError, ValueError, json.JSONDecodeError) as error:
             self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
@@ -1834,7 +2032,7 @@ def main() -> None:
         "--settings-file",
         type=Path,
         default=default_settings_file,
-        help="App settings file used for provider keys; kept outside project folders.",
+        help="App preferences file; provider keys use the device credential store.",
     )
     parser.add_argument(
         "--projects-dir",

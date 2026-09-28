@@ -3,6 +3,14 @@
 
   const FALLBACK_PROVIDERS = [
     {
+      id: "gemini", name: "Google Gemini", defaultModel: "gemini-3.6-flash", configured: false,
+      models: [
+        { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", note: "Balanced" },
+        { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", note: "Quality" },
+        { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite", note: "Economical" },
+      ],
+    },
+    {
       id: "openai",
       name: "OpenAI",
       defaultModel: "gpt-5.6-terra",
@@ -13,17 +21,19 @@
         { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", note: "Economical" },
       ],
     },
-    {
-      id: "gemini",
-      name: "Google Gemini",
-      defaultModel: "gemini-3.6-flash",
-      configured: false,
-      models: [
-        { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", note: "Balanced" },
-        { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", note: "Quality" },
-        { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite", note: "Economical" },
-      ],
-    },
+    { id: "groq", name: "Groq", defaultModel: "qwen/qwen3.6-27b", configured: false,
+      models: [{ id: "qwen/qwen3.6-27b", name: "Qwen 3.6 27B", note: "Fast vision" }] },
+    { id: "openrouter", name: "OpenRouter", defaultModel: "google/gemini-3.8-flash", configured: false,
+      models: [{ id: "google/gemini-3.8-flash", name: "Gemini 3.8 Flash", note: "Vision" },
+        { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", note: "Vision" }] },
+    { id: "anthropic", name: "Anthropic Claude", defaultModel: "claude-sonnet-5", configured: false,
+      models: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5", note: "Vision" }] },
+    { id: "xai", name: "xAI Grok", defaultModel: "grok-4.7", configured: false,
+      models: [{ id: "grok-4.7", name: "Grok 4.7", note: "Vision" }] },
+    { id: "mistral", name: "Mistral", defaultModel: "mistral-small-latest", configured: false,
+      models: [{ id: "mistral-small-latest", name: "Mistral Small", note: "Vision" }] },
+    { id: "custom", name: "Custom API", defaultModel: "vision-model", configured: false,
+      models: [{ id: "vision-model", name: "Enter model ID below", note: "" }] },
   ];
 
   const state = {
@@ -42,9 +52,9 @@
     draftController: null,
     draftRequestId: 0,
     lastDraftError: "",
-    providerModel: "gpt-5.6-terra",
-    providerModels: { openai: "gpt-5.6-terra", gemini: "gemini-3.6-flash" },
-    providerId: "openai",
+    providerModel: "gemini-3.6-flash",
+    providerModels: { gemini: "gemini-3.6-flash", openai: "gpt-5.6-terra" },
+    providerId: "gemini",
     imageDetail: "auto",
     exportPreferences: { copyPrompt: true, openFolder: true, highestQualityMedia: true },
     workspacePreferences: { lastActiveProjectId: null, openProjectIds: [] },
@@ -92,6 +102,9 @@
     aiSettings: document.querySelector("#aiSettings"),
     providerStatus: document.querySelector("#providerStatus"),
     providerInput: document.querySelector("#providerInput"),
+    customModelInput: document.querySelector("#customModelInput"),
+    customApiBaseInput: document.querySelector("#customApiBaseInput"),
+    customApiBaseField: document.querySelector("#customApiBaseField"),
     modelInput: document.querySelector("#modelInput"),
     imageDetailInput: document.querySelector("#imageDetailInput"),
     apiKeyInput: document.querySelector("#apiKeyInput"),
@@ -369,7 +382,7 @@
     state.aiDraft = normalizeDraft(clone(snapshot.aiDraft || null));
     state.lastDraftError = "";
     if (!preserveProviderSettings) {
-      state.providerId = snapshot.providerId || "openai";
+      state.providerId = snapshot.providerId || "gemini";
       state.providerModels = {
         openai: "gpt-5.6-terra",
         gemini: "gemini-3.6-flash",
@@ -629,7 +642,7 @@
     preview.style.top = `${Number.isFinite(options.y) ? options.y : center.y - 80}px`;
     if (Number.isFinite(options.width)) preview.style.width = `${options.width}px`;
     if (Number.isFinite(options.height)) preview.style.height = `${options.height}px`;
-    preview.innerHTML = `<div class="pending-preview-art"><span></span><i></i></div><div class="pending-preview-info"><strong></strong><small></small></div><div class="pending-preview-track"><span></span></div>`;
+    preview.innerHTML = `<div class="pending-preview-art"><span class="pending-preview-orbit">✦</span><i>CREATING</i></div><div class="pending-preview-info"><strong></strong><small></small></div><div class="pending-preview-track"><span></span></div>`;
     if (options.sourceSrc) {
       const sourceImage = document.createElement("img");
       sourceImage.className = "pending-preview-source";
@@ -652,7 +665,7 @@
     const value = Number(progress);
     const measured = Number.isFinite(value) && value > 0 && value < 100;
     entry.element.classList.toggle("measured", measured);
-    entry.element.querySelector("small").textContent = measured ? `${label} · ${Math.round(value)}%` : label;
+    entry.element.querySelector("small").textContent = measured ? `${Math.round(value)}% · ${label}` : label;
     entry.element.querySelector(".pending-preview-track span").style.width = measured ? `${value}%` : "38%";
   }
 
@@ -2003,7 +2016,7 @@
   }
 
   function renderProviderOptions() {
-    const preferred = state.providerId || els.providerInput.value || "openai";
+    const preferred = state.providerId || els.providerInput.value || "gemini";
     els.providerInput.innerHTML = "";
     state.providers.forEach((provider) => {
       const option = document.createElement("option");
@@ -2013,7 +2026,7 @@
     });
     els.providerInput.value = state.providers.some((provider) => provider.id === preferred)
       ? preferred
-      : state.providers[0]?.id || "openai";
+      : state.providers[0]?.id || "gemini";
   }
 
   function renderProviderSettings() {
@@ -2033,7 +2046,16 @@
       els.modelInput.append(option);
     });
     const modelIds = provider.models.map((model) => model.id);
+    if (previousModel && !modelIds.includes(previousModel)) {
+      const option = document.createElement("option");
+      option.value = previousModel;
+      option.textContent = `${previousModel} · Custom`;
+      els.modelInput.append(option);
+      modelIds.push(previousModel);
+    }
     els.modelInput.value = modelIds.includes(previousModel) ? previousModel : provider.defaultModel;
+    els.customModelInput.value = modelIds.includes(previousModel) && !provider.models.some((model) => model.id === previousModel) ? previousModel : "";
+    els.customApiBaseField.hidden = provider.id !== "custom";
     state.providerModel = els.modelInput.value;
     state.providerModels[provider.id] = els.modelInput.value;
     if (provider.configured) {
@@ -2041,20 +2063,18 @@
       setProviderConnection(
         "success",
         state.mockMode ? "Connected in test mode" : "Connected",
-        provider.credentialStorage === "settings-file"
-          ? `${provider.name} is ready. Its key is saved in local app settings.`
+        provider.credentialStorage === "device-keychain"
+          ? `${provider.name} is ready. Your key is saved on this device.`
           : `${provider.name} is ready for this session.`,
       );
       els.removeProviderButton.hidden = false;
     } else {
       els.providerStatus.textContent = `${provider.name} · not connected`;
       const article = /^[aeiou]/i.test(provider.name) ? "an" : "a";
-      setProviderConnection("neutral", "Not connected", `Paste ${article} ${provider.name} API key, then choose Save & connect.`);
+      setProviderConnection("neutral", "Ready to connect", `Paste ${article} ${provider.name} API key above.`);
       els.removeProviderButton.hidden = true;
     }
-    els.apiKeyInput.placeholder = provider.id === "gemini"
-      ? "Paste Gemini API key"
-      : "Paste OpenAI API key";
+    els.apiKeyInput.placeholder = `Paste ${provider.name} API key`;
   }
 
   async function checkProviderHealth() {
@@ -2062,12 +2082,12 @@
       const response = await fetch("/api/health", { cache: "no-store" });
       if (!response.ok) throw new Error("Local drafting server unavailable");
       const health = await response.json();
-      const requestedProvider = els.providerInput.value || state.providerId;
+      const requestedProvider = state.providerId || els.providerInput.value;
       state.providers = health.providers?.length ? health.providers : cloneProviderRegistry(FALLBACK_PROVIDERS);
       state.mockMode = Boolean(health.mockMode);
       els.projectsFolderPath.textContent = health.projectsFolder || "Project folder unavailable";
       const knownProviderIds = state.providers.map((provider) => provider.id);
-      state.providerId = knownProviderIds.includes(requestedProvider) ? requestedProvider : knownProviderIds[0] || "openai";
+      state.providerId = knownProviderIds.includes(requestedProvider) ? requestedProvider : knownProviderIds[0] || "gemini";
       renderProviderOptions();
       renderProviderSettings();
       const projectsReady = await refreshProjects();
@@ -2105,6 +2125,8 @@
         lastActiveProjectId: result.preferences?.lastActiveProjectId || null,
         openProjectIds: Array.isArray(result.preferences?.openProjectIds) ? result.preferences.openProjectIds : [],
       };
+      state.providerId = result.preferences?.providerId || "gemini";
+      els.customApiBaseInput.value = result.preferences?.customApiBase || "http://127.0.0.1:1234/v1";
       renderExportPreferences();
     } catch (error) {
       console.error(error);
@@ -2151,7 +2173,7 @@
         await fetch("/api/preferences", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(state.workspacePreferences),
+          body: JSON.stringify({ ...state.workspacePreferences, providerId: state.providerId }),
         });
       } catch (error) {
         console.error(error);
@@ -2175,7 +2197,7 @@
       const response = await fetch(`/api/providers/${encodeURIComponent(providerId)}/credential`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify({ apiKey, apiBase: providerId === "custom" ? els.customApiBaseInput.value.trim() : undefined }),
       });
       const result = await readApiResult(response, "connecting the provider");
       if (!response.ok) throw new Error(result.error || "Provider setup failed");
@@ -2194,7 +2216,7 @@
       return false;
     } finally {
       els.saveProviderButton.disabled = false;
-      els.saveProviderButton.textContent = "Save & connect";
+      els.saveProviderButton.textContent = "Connect";
     }
   }
 
@@ -3937,7 +3959,7 @@
     menu.className = "map-radial-menu";
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", `Maps for ${source.name}`);
-    const diameter = 344;
+    const diameter = 320;
     menu.style.left = `${clamp(clientX - diameter / 2, 8, Math.max(8, innerWidth - diameter - 8))}px`;
     menu.style.top = `${clamp(clientY - diameter / 2, 8, Math.max(8, innerHeight - diameter - 8))}px`;
     const center = document.createElement("div");
@@ -3954,8 +3976,8 @@
       button.className = `map-radial-option${existing ? " has-map" : ""}`;
       button.setAttribute("role", "menuitem");
       button.setAttribute("aria-label", `${existing ? "Open" : "Generate"} ${label} map`);
-      button.style.left = `${172 + Math.cos(angle) * 126}px`;
-      button.style.top = `${172 + Math.sin(angle) * 126}px`;
+      button.style.left = `${160 + Math.cos(angle) * 119}px`;
+      button.style.top = `${160 + Math.sin(angle) * 119}px`;
       const visual = existing ? document.createElement("img") : document.createElement("span");
       visual.className = existing ? "map-radial-thumb" : "map-radial-symbol";
       if (existing) { visual.src = existing.src; visual.alt = ""; }
@@ -4440,19 +4462,40 @@
     invalidateAIDraft("Vision model changed. Regenerate to use the selected model.");
     scheduleSave();
   });
+  els.customModelInput.addEventListener("change", () => {
+    const modelId = els.customModelInput.value.trim();
+    if (!modelId) return;
+    let option = [...els.modelInput.options].find((item) => item.value === modelId);
+    if (!option) { option = new Option(`${modelId} · Custom`, modelId); els.modelInput.append(option); }
+    els.modelInput.value = modelId;
+    state.providerModel = modelId;
+    state.providerModels[els.providerInput.value] = modelId;
+    invalidateAIDraft("Vision model changed. Regenerate to use the selected model.");
+    scheduleSave();
+  });
   els.providerInput.addEventListener("change", () => {
     state.providerId = els.providerInput.value;
     els.apiKeyInput.value = "";
     renderProviderSettings();
     invalidateAIDraft("AI provider changed. Regenerate to use the selected provider.");
     scheduleSave();
+    scheduleWorkspacePreferences();
   });
   els.apiKeyInput.addEventListener("input", () => {
     if (!els.apiKeyInput.value.trim()) {
       renderProviderSettings();
       return;
     }
-    setProviderConnection("neutral", "Key ready to check", `Choose Save & connect to validate this ${selectedProvider()?.name || "provider"} key.`);
+    const key = els.apiKeyInput.value.trim();
+    const detected = key.startsWith("AIza") ? "gemini" : key.startsWith("gsk_") ? "groq"
+      : key.startsWith("sk-or-") ? "openrouter" : key.startsWith("sk-ant-") ? "anthropic"
+        : key.startsWith("sk-") ? "openai" : null;
+    if (detected && detected !== els.providerInput.value) {
+      els.providerInput.value = detected;
+      renderProviderSettings();
+      scheduleWorkspacePreferences();
+    }
+    setProviderConnection("neutral", "Ready to connect", `${selectedProvider()?.name || "Provider"} detected. Choose Connect to save this key on your device.`);
   });
   els.saveProviderButton.addEventListener("click", saveProviderCredential);
   els.removeProviderButton.addEventListener("click", removeProviderCredential);

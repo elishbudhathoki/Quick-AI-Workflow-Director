@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Canvas</title>
-    <link rel="stylesheet" href="./styles.css?v=20260928-desktop-release-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260928-provider-refresh-1" />
   </head>
   <body>
     <main class="app-shell">
@@ -148,25 +148,51 @@
 
         <div id="settingsTab" class="panel-content" hidden>
           <div class="settings-heading">
-            <strong>AI providers</strong>
-            <small>Connected providers work across every project.</small>
+            <strong>Connect AI</strong>
+            <small>One key. Ready whenever you open AI Canvas.</small>
           </div>
           <details id="aiSettings" class="ai-settings" open>
             <summary>
-              <span>AI settings</span>
+              <span>Connection</span>
               <small id="providerStatus">Checking local server…</small>
             </summary>
             <div class="ai-settings-body">
+              <div class="provider-hero" aria-hidden="true"><span>✦</span><strong>Bring your own AI</strong><small>Connect privately on this device</small></div>
+              <label class="provider-key-field">
+                <span>API key</span>
+                <input id="apiKeyInput" type="password" placeholder="Paste your Gemini API key" autocomplete="off" spellcheck="false" />
+              </label>
+              <div class="provider-actions">
+                <button id="saveProviderButton" class="button primary" type="button">Connect</button>
+                <button id="removeProviderButton" class="button ghost" type="button" hidden>Remove key</button>
+              </div>
+              <details class="provider-advanced">
+                <summary>Other providers &amp; model options</summary>
+                <div class="provider-advanced-grid">
               <label>
                 <span>Provider</span>
                 <select id="providerInput">
-                  <option value="openai">OpenAI</option>
                   <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="groq">Groq</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="xai">xAI Grok</option>
+                  <option value="mistral">Mistral</option>
+                  <option value="custom">Custom API</option>
                 </select>
               </label>
               <label>
                 <span>Vision model</span>
                 <select id="modelInput"></select>
+              </label>
+              <label class="provider-custom-model">
+                <span>Custom model ID <small>(optional)</small></span>
+                <input id="customModelInput" type="text" placeholder="e.g. provider/vision-model" spellcheck="false" />
+              </label>
+              <label id="customApiBaseField" hidden>
+                <span>API base URL</span>
+                <input id="customApiBaseInput" type="url" placeholder="http://127.0.0.1:1234/v1" spellcheck="false" />
               </label>
               <label>
                 <span>Image detail</span>
@@ -177,10 +203,8 @@
                   <option value="low">Low · faster</option>
                 </select>
               </label>
-              <label>
-                <span>API key <small>(saved in local settings)</small></span>
-                <input id="apiKeyInput" type="password" placeholder="Paste provider API key" autocomplete="off" spellcheck="false" />
-              </label>
+                </div>
+              </details>
               <div id="providerConnection" class="provider-connection neutral" role="status" aria-live="polite">
                 <span class="provider-connection-dot" aria-hidden="true"></span>
                 <span>
@@ -188,11 +212,8 @@
                   <small id="keyHint">Looking for the local AI Canvas server…</small>
                 </span>
               </div>
-              <div class="provider-actions">
-                <button id="saveProviderButton" class="button secondary" type="button">Save &amp; connect</button>
-                <button id="removeProviderButton" class="button ghost" type="button" hidden>Remove key</button>
-              </div>
-              <button id="mockDraftButton" class="button secondary" type="button">Draft without AI</button>
+              <small class="provider-privacy">Your key stays in this device's credential store. It is never saved in a project.</small>
+              <button id="mockDraftButton" class="button ghost" type="button">Continue without AI</button>
             </div>
           </details>
           <details class="ai-settings export-settings" open>
@@ -316,6 +337,6 @@
       </footer>
     </main>
 
-    <script src="./app.js?v=20260928-desktop-release-1" defer></script>
+    <script src="./app.js?v=20260928-provider-refresh-1" defer></script>
   </body>
 </html>

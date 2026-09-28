@@ -23,17 +23,18 @@ python setup.py --maps
 
 This optional step installs PyTorch and model-processing packages and may use substantial disk space. Published model weights download from their upstream repositories when a learned map is first generated; no weights are included in this repo. Canny needs no model download. Animal pose and custom map models use a separately installed local ComfyUI workflow. See [model sources and licenses](THIRD_PARTY_NOTICES.md) before distributing any weights.
 
-The app uses an FFmpeg binary from `imageio-ffmpeg` for video processing. Some public video sites can still impose their own restrictions. Provider drafting requires an OpenAI or Gemini key entered in app settings; map generation itself is local.
+The app uses an FFmpeg binary from `imageio-ffmpeg` for video processing. Some public video sites can still impose their own restrictions. Provider drafting supports Gemini, OpenAI, Groq, OpenRouter, Anthropic, xAI, and Mistral. Choose **Custom API** for an OpenAI-compatible vision endpoint and enter its base URL, model ID, and key. Custom endpoints require HTTPS unless they run on this device. OpenRouter also gives access to many other vision models through one key. Map generation itself is local.
 
 ## Where files go
 
 | Data | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | Projects and exports | `~/Documents/AI Canvas Projects` | `~/Documents/AI Canvas Projects` when Documents exists; otherwise app data `projects/` | Same as macOS |
-| App settings | `%LOCALAPPDATA%/AI Canvas/settings.json` | `~/Library/Application Support/AI Canvas/settings.json` | `${XDG_DATA_HOME:-~/.local/share}/ai-canvas/settings.json` |
+| App preferences | `%LOCALAPPDATA%/AI Canvas/settings.json` | `~/Library/Application Support/AI Canvas/settings.json` | `${XDG_DATA_HOME:-~/.local/share}/ai-canvas/settings.json` |
+| API keys | Windows Credential Manager | macOS Keychain | Secret Service compatible desktop keyring |
 | Learned model weights | Hugging Face and processor caches for the current user | Same | Same |
 
-`settings.json` currently contains provider API keys in readable form. Keep it private and do not add it or project folders to Git. The app never needs to copy projects or keys into the source checkout. Use `python start.py --projects-dir PATH --settings-file PATH` to choose other locations, or set `AI_CANVAS_PROJECTS_DIR` for the project root. See [storage details](docs/STORAGE.md).
+Provider API keys remain on your device in its credential store and reconnect when AI Canvas starts. Existing keys in `settings.json` are migrated and removed from that file when the credential store is available. On Linux, persistent keys require an unlocked Secret Service compatible keyring; without one, use an environment variable such as `GEMINI_API_KEY`. The app never copies projects or keys into the source checkout. Use `python start.py --projects-dir PATH --settings-file PATH` to choose other data locations, or set `AI_CANVAS_PROJECTS_DIR` for the project root. See [storage details](docs/STORAGE.md).
 
 ## Updating this clone
 
